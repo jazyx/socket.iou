@@ -1,0 +1,215 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <style>
+    body {
+      margin: 0;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      color: #ddd;
+      background-color: #222;
+      height: 100vh;
+    }
+    main {
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
+      align-items: center;
+      padding: 0.5em;
+      border: 1px inset #fff;
+    }
+    #buttons {
+      --dim: #ccc;
+      display: flex;
+      button {
+        width: 6em;
+        margin: 0.5em;
+      }
+
+      #connect {
+        opacity: 0.25;
+        pointer-events: none;
+        background-color: var(--dim);
+        border-color: var(--dim);
+      }
+      #disconnect {
+        opacity: 1;
+        pointer-events: all;
+        background-color: #c00;
+        border-color: #900;
+        cursor: pointer;
+      }
+    }
+
+    #buttons.disconnected {
+      #connect {
+        opacity: 1;
+        pointer-events: all;
+        background-color: #0c0;
+        border-color: #090;
+      }
+      #disconnect {
+        opacity: 0.25;
+        pointer-events: none;
+        background-color: var(--dim);
+        border-color: var(--dim);
+      }
+    }
+    #username.disconnected {
+      opacity: 0.25;
+      pointer-events: none;
+    }
+    
+    input {
+      width: 8em;
+    }
+    ul {
+      min-height: 2em;
+      border: 1px inset #fff;
+      margin: 0.5em 0 0;
+      background-color: #444;
+
+      li:nth-child(even) {
+        background-color: #422
+      }
+
+      li:nth-child(odd) {
+        background-color: #222
+      }
+    }
+  </style>
+  <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
+  <title>Socket.IO MVP</title>
+</head>
+<body>
+  <main>
+    <p id="location"></p>
+    <p>Connected: <span id="connected"></span></p>
+    <div id="buttons">
+      <button
+        type="button"
+        id="connect"
+      >
+        Connect
+      </button>
+      <button
+        type="button"
+        id="disconnect"
+      >
+        Disconnect
+      </button>
+    </div>
+    <form id="form">
+      <span>Log in as:</span>
+      <input
+        id="username"
+        type="text"
+      />
+    </form>
+    <ul id="messages"></ul>
+  </main>
+
+  <script>
+    // const socket = io("http://localhost:6661");
+    const socket = io("https://iou.jazyx.com");
+    
+    const locate     = document.getElementById("location")
+    const connected  = document.getElementById("connected")
+    const buttons    = document.getElementById("buttons")
+    const connect    = document.getElementById("connect")
+    const disconnect = document.getElementById("disconnect")
+    const form       = document.getElementById("form")
+    const username   = document.getElementById("username")
+    const messages   = document.getElementById("messages")
+
+    let isConnected  = false
+
+    const HANDLED = [
+      "connection",   
+      "disconnect",  
+      "logged_in"
+    ]
+
+    socket.on("connection", treatConnection)
+    socket.on("disconnect", treatDisconnect)
+    socket.on("logged_in",  treatLogin)
+    socket.onAny(treatAnyMessage)
+
+
+    connect.addEventListener("click", connectSocket)
+    disconnect.addEventListener("click", disconnectSocket)
+    form.addEventListener("submit", logIn)
+
+
+    function connectSocket() {
+      const result = socket.connect()
+      console.log("connectSocket:", result )
+    }
+
+    function disconnectSocket() {
+      socket.disconnect()
+    }
+    
+    function treatConnection(message) {
+      addMessageToList("connection:", message)
+      isConnected = true
+      showConnectionStatus()
+
+      username.select()
+      username.focus()
+    }
+    
+    function treatDisconnect(message) {
+      addMessageToList("disconnect:", message)
+      isConnected = false
+      showConnectionStatus()
+    }
+
+    function logIn(event) {
+      event.preventDefault()
+      socket.emit("login", username.value, loggedIn)
+    }
+
+    function loggedIn(loggedInData) {
+      console.log("loggedInData:", loggedInData)
+      const { subject, user, message } = loggedInData
+      addMessageToList(subject, message)
+      showConnectionStatus()
+    }
+
+    function treatLogin(message) {
+      addMessageToList("logged_in:", message)
+      showConnectionStatus()
+    }
+
+
+    function treatAnyMessage(message) {
+      if (HANDLED.indexOf(message) < 0) {
+        addMessageToList("any:", message)
+        showConnectionStatus()
+      }
+    }
+
+
+    function addMessageToList(label, message) {
+      console.log(label, message)
+      li = document.createElement("li")
+      li.textContent = message
+      messages.append(li)
+    }
+
+    function showConnectionStatus() {
+      connected.textContent = "" + isConnected
+      buttons.className = isConnected ? null : "disconnected"
+      username.className = isConnected ? null : "disconnected"
+    }
+
+    locate.textContent = location.origin
+    showConnectionStatus()
+
+  </script>
+</body>
+</html>
