@@ -305,7 +305,11 @@ const TIMEOUT   = 2000
     // the last successful ping and lastPing. Let's say it always
     // happens at the halfway point: after (ping_delay / 2) ms
     const uptime = Math.round(
-      (lastPing - (ping_delay / 2) - restartMS) / 100
+      (   lastPing              // time of failed attempt
+        - (ping_delay / 2)      // halfway point before that
+        + statistics.midLatency // time alive after last success
+        - restartMS             // time resetServer was called
+      ) / 100
     ) / 10
     uptimes.push(uptime)
 
