@@ -28,6 +28,7 @@ const TIMEOUT   = 2000
   let ping_interval
   let ping_timeout = 0
   let ping_delay = MID_DELAY
+  let down = 0
   const latencies = []
 
 
@@ -64,15 +65,18 @@ const TIMEOUT   = 2000
     socket.onclose   = treatDisconnect
 
     startMS = + new Date()
+    if (down) {
+      console.log(`Down time: ${startMS - down} ms`)
+    }
     ping_interval = setInterval(ping, ping_delay)
 
     return socket
   }
 
 
-  function closeSocket() {
-    socket.close(1000, "client action")
-    console.log("socket.close() called")
+  function closeSocket(code=1000, reason="client action") {
+    socket.close(code, reason)
+    console.log(`socket.close(${code}, ${reason}) called`)
   }
 
 
@@ -88,7 +92,8 @@ const TIMEOUT   = 2000
 
   function treatError(event) {
     console.log("ERROR:", event)
-    addMessageToList(`"${event.type}" event received \nisConnected: ${isConnected}\nsocket.readyState: ${socket.readyState}`)
+    addMessageToList(`"${event.type}" event received \nisConnected: ${isConnected}\nsocket.readyState: ${socket ? socket.readyState : "no socket"}`)
+
     showConnectionStatus()
   }
 
@@ -257,13 +262,23 @@ const TIMEOUT   = 2000
         )) / latencies.length
       : "n/a"
 
+    down = new Date()
+
     const statistics = JSON.stringify({
-      maxLatency, midLatency, minLatency, length
+      maxLatency,
+      midLatency,
+      minLatency,
+      length,
+      down: d.toTimeString().slice(0, 8)
     }, null, '  ')
     console.log("statistics:", statistics)
     addMessageToList(statistics)
+
+    // Stop pinging until the socket is reopened
+    clearInterval(ping_interval)
     
     // Consider that the connection was dropped and restart it.
+    closeSocket(1000, "ping timeout")
     setServer()
   }
 
