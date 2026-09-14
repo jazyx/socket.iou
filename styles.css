@@ -75,9 +75,13 @@
 
   .buttons {
     --dim: #ccc;
+    --connect: #090;
+    --disconnect: #960;
+    --stop: #900
+    ;
     button {
       width: 6em;
-      margin: 0.5em;
+      margin: 0.25em;
     }
 
     .connect {
@@ -89,8 +93,15 @@
     .disconnect {
       opacity: 1;
       pointer-events: all;
-      background-color: #c00;
-      border-color: #900;
+      background-color: var(--disconnect);
+      border-color: var(--disconnect);
+      cursor: pointer;
+    }
+    .stop {
+      opacity: 1;
+      pointer-events: all;
+      background-color: var(--stop);
+      border-color: var(--stop);
       cursor: pointer;
     }
   }
@@ -99,11 +110,33 @@
     .connect {
       opacity: 1;
       pointer-events: all;
-      background-color: #0c0;
-      border-color: #090;
+      background-color: var(--connect);
+      border-color: var(--connect);
       cursor: pointer;
     }
     .disconnect {
+      opacity: 0.25;
+      pointer-events: none;
+      background-color: var(--dim);
+      border-color: var(--dim);
+    }
+  }
+
+  .buttons.stopped {
+    .connect {
+      opacity: 1;
+      pointer-events: all;
+      background-color: var(--connect);
+      border-color: var(--connect);
+      cursor: pointer;
+    }
+    .disconnect {
+      opacity: 0.25;
+      pointer-events: none;
+      background-color: var(--dim);
+      border-color: var(--dim);
+    }
+    .stop {
       opacity: 0.25;
       pointer-events: none;
       background-color: var(--dim);

@@ -8,12 +8,13 @@
   const buttons    = div.querySelector(".buttons")
   const connect    = div.querySelector(".connect")
   const disconnect = div.querySelector(".disconnect")
+  const stop       = div.querySelector(".stop")
   const form       = div.querySelector("form")
   const username   = div.querySelector(".username")
   const messages   = div.querySelector(".messages")
 
   let socket
-  let isConnected  = false
+  let status = "disconnected"
 
   backend.addEventListener("change", setServer)
 
@@ -23,7 +24,7 @@
     }
     console.log("setServer url:", url)
 
-    if (isConnected) {
+    if (status === "connected") {
       socket.disconnect()
     }
 
@@ -45,22 +46,35 @@
 
   connect.addEventListener("click", connectSocket)
   disconnect.addEventListener("click", disconnectSocket)
+  stop.addEventListener("click", stopSocket)
   form.addEventListener("submit", logIn)
 
 
   function connectSocket() {
-    const result = socket.connect()
-    console.log("connectSocket:", result )
+    if (!socket) {
+      setServer()
+    } else {
+      const result = socket.connect()
+      console.log("connectSocket:", result )
+    }
   }
 
   function disconnectSocket() {
     socket.disconnect()
   }
 
+  function stopSocket() {
+    socket && socket.disconnect()
+    socket = null
+    addMessageToList("connection:", "socket stopped")
+    status = "stopped"
+    showConnectionStatus()
+  }
+
   function treatConnection(message) {
     message += `\nto ${getURL()}`
     addMessageToList("connection:", message)
-    isConnected = true
+    status = "connected"
     showConnectionStatus()
 
     username.select()
@@ -70,7 +84,7 @@
   function treatDisconnect(message) {
     message += `\nfrom ${getURL()}`
     addMessageToList("disconnect:", message)
-    isConnected = false
+    status = "disconnected"
     showConnectionStatus()
   }
 
@@ -105,15 +119,27 @@
     li = document.createElement("li")
     li.textContent = message
     messages.append(li)
-    
+
     messages.scroll(0, messages.scrollHeight)
   }
 
 
   function showConnectionStatus() {
-    connected.textContent = "" + isConnected
-    const action = isConnected ? "remove" : "add"
-    buttons.classList[action]("disconnected")
+    connected.textContent = status
+
+    const unclassed = (status === "connected")
+      ? ["disconnected", "stopped"]
+      : (status === "disconnected")
+        ? ["connected", "stopped"]
+        : ["connected", "disconnected"]
+
+    unclassed.forEach(className => (
+      buttons.classList.remove(className)
+    ))
+
+    buttons.classList.add(status)
+
+    const action = (status === "connected") ? "remove" : "add"
     username.classList[action]("disconnected")
   }
 
