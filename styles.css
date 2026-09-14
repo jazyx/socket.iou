@@ -29,7 +29,7 @@
     border-top-left-radius: 0.5em;
     border-top-right-radius: 0.5em;
 
-    &:not(:has(:target)) div:first-of-type {
+    &:not(:has(:target)) > div:first-of-type {
       display: block;
     }
   }
@@ -150,16 +150,15 @@
   
   input {
     width: 8em;
+    margin-left: 0.25em;
   }
 
   ul {
-    min-height: 2em;
-    max-height: 20em;
+    height: 25em;
     overflow-y: auto;
     overflow-x: hidden;
     border: 1px inset #fff;
     margin: 0.5em 0 0;
-    background-color: #444;
     white-space: pre;
     color: #999;
 
@@ -173,7 +172,7 @@
     }
 
     li:nth-child(even) {
-      --bg: #000;
+      --bg: #444;
       background-color: var(--bg);
       position: relative;
 

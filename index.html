@@ -13,14 +13,41 @@
 <body>
   <main>
     <header>
-      <a href="#socket-io">Socket.IO</a>
       <a href="#websocket" class="current">WebSocket</a>
+      <a href="#socket-io">Socket.IO</a>
     </header>
     <p id="frontend"></p>
     <select id="backend">
       <option value="http://localhost:6661">http://localhost:6661</option>
       <option value="https://iou.jazyx.com">https://iou.jazyx.com</option>
     </select>
+
+    <div id="websocket">
+      <p>Connected: <span class="connected"></span></p>
+      <div class="buttons">
+        <button
+          type="button"
+          class="connect"
+        >
+          Connect
+        </button>
+        <button
+          type="button"
+          class="disconnect"
+        >
+          Disconnect
+        </button>
+      </div>
+      <form>
+        <span>Log in as </span>
+        <input
+          class="username"
+          type="text"
+          value="WebSocket"
+        />
+      </form>
+      <ul class="messages"></ul>
+    </div>
 
     <div id="socket-io">
       <p>Status: <span class="connected"></span></p>
@@ -45,38 +72,11 @@
         </button>
       </div>
       <form>
-        <span>Log in as:</span>
+        <span>Log in as </span>
         <input
           class="username"
           type="text"
           value="SocketIO"
-        />
-      </form>
-      <ul class="messages"></ul>
-    </div>
-
-    <div id="websocket">
-      <p>Connected: <span class="connected"></span></p>
-      <div class="buttons">
-        <button
-          type="button"
-          class="connect"
-        >
-          Connect
-        </button>
-        <button
-          type="button"
-          class="disconnect"
-        >
-          Disconnect
-        </button>
-      </div>
-      <form>
-        <span>Log in as:</span>
-        <input
-          class="username"
-          type="text"
-          value="WebSocket"
         />
       </form>
       <ul class="messages"></ul>

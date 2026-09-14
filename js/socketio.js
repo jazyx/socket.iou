@@ -14,7 +14,7 @@
   const messages   = div.querySelector(".messages")
 
   let socket
-  let status = "disconnected"
+  let status = "stopped"
 
   backend.addEventListener("change", setServer)
 
@@ -150,6 +150,6 @@
     return l
   }
 
-  setServer()
+  // setServer()
   showConnectionStatus()
 })()
