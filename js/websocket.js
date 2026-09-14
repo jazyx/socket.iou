@@ -20,10 +20,12 @@ const TIMEOUT   = 2000
   const username   = div.querySelector(".username")
   const messages   = div.querySelector(".messages")
 
+  const initialMS = + new Date()
   let socket  = null
   let isConnected  = false
   let user_id = ""
-  let startMS = 0
+  let restartMS = 0
+  let lastPing
 
   let ping_interval
   let ping_timeout = 0
@@ -69,9 +71,9 @@ const TIMEOUT   = 2000
     socket.onmessage = treatMessage
     socket.onclose   = treatDisconnect
 
-    startMS = + new Date()
+    restartMS = + new Date()
     if (down) {
-      const message = `Down time: ${startMS - down} ms`
+      const message = `Down time: ${restartMS - down} ms`
       console.log("message:", message)
       addMessageToList(message)
     }
@@ -263,11 +265,12 @@ const TIMEOUT   = 2000
 
   function ping() {
     ping_timeout = setTimeout(timeoutPing, TIMEOUT)
+    lastPing = +new Date()
 
     const message = {
       recipient_id: "SYSTEM",
       subject: "PING",
-      time: + new Date(),
+      time: lastPing,
       ping_timeout
     }
 
@@ -298,7 +301,12 @@ const TIMEOUT   = 2000
     latencies.length = 0
 
     down = new Date()
-    const uptime = Math.round((down - startMS) / 100) / 10
+    // The break could have happened any time in the period between
+    // the last successful ping and lastPing. Let's say it always
+    // happens at the halfway point: after (ping_delay / 2) ms
+    const uptime = Math.round(
+      (lastPing - (ping_delay / 2) - restartMS) / 100
+    ) / 10
     uptimes.push(uptime)
 
     statistics.uptime = uptime
@@ -308,9 +316,14 @@ const TIMEOUT   = 2000
     console.log("statistics:", statistics)
     addMessageToList(statistics)
 
-    const uptimeInfo = JSON.stringify(
-      getStatistics(uptimes, "Uptime"), null, 2
-    )
+    let uptimeInfo = getStatistics(uptimes, "Uptime")
+    const total = Math.round((+ new Date() - initialMS) / 100) / 10
+    uptimeInfo.totalTime = total
+    uptimeInfo.ratio = Math.round(
+      uptimeInfo.totalUptime * 1000 / total
+    ) / 10 + "%"
+
+    uptimeInfo = JSON.stringify(uptimeInfo, null, 2)
     console.log("uptimeInfo:", uptimeInfo)
     addMessageToList(uptimeInfo)
 
@@ -329,7 +342,7 @@ const TIMEOUT   = 2000
     const length = array.length
     const total = Math.round(array.reduce((sum, value) => (
       sum += value
-    )))
+    )) * 10) / 10
     const mid = length
       ? Math.round(total * 10 / length) / 10
       : "n/a"
