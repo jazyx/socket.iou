@@ -122,7 +122,8 @@
   ul {
     min-height: 2em;
     max-height: 20em;
-    overflow: auto;
+    overflow-y: auto;
+    overflow-x: hidden;
     border: 1px inset #fff;
     margin: 0.5em 0 0;
     background-color: #444;

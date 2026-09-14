@@ -169,6 +169,8 @@ const WS_PATH = "/ws"
     li = document.createElement("li")
     li.textContent = data
     messages.append(li)
+
+    messages.scroll(0, messages.scrollHeight)
   }
 
 

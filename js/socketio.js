@@ -105,6 +105,8 @@
     li = document.createElement("li")
     li.textContent = message
     messages.append(li)
+    
+    messages.scroll(0, messages.scrollHeight)
   }
 
 
