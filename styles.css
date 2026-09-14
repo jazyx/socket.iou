@@ -1,0 +1,161 @@
+  body {
+    margin: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: center;
+    align-items: center;
+    color: #ddd;
+    background-color: #222;
+    height: 100vh;
+  }
+
+  div {
+    display: none;
+    border-top: 1px solid white;
+
+    &:target {
+      display: block;
+    }
+  }
+
+  main {
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 0.5em 0.5em;
+    border: 1px inset #fff;
+      border-top: none;
+    border-top-left-radius: 0.5em;
+    border-top-right-radius: 0.5em;
+
+    &:not(:has(:target)) div:first-of-type {
+      display: block;
+    }
+  }
+
+  header {
+    display: flex;
+    justify-content: stretch;
+    width: calc(100% + 1em);
+    margin: 0 -0.5em 0.5em;
+
+    a {
+      padding: 0.25em ;
+      flex: 1;
+      text-align: center;
+      border: 1px outset white;
+      border-top-left-radius: 0.5em;
+      border-top-right-radius: 0.5em;
+      color: #ddd;
+      background-color: #444;
+
+      &.current {
+        border-bottom: none;
+        color: #fff;
+        background-color: transparent;
+      }
+    }
+  }
+
+  select {
+    margin-bottom: 1em;
+  }
+
+  p {
+    margin: 0.25em;
+    text-align: center;
+  }
+
+  .buttons,
+  form {
+    display: flex;
+    justify-content: center;
+  }
+
+  .buttons {
+    --dim: #ccc;
+    button {
+      width: 6em;
+      margin: 0.5em;
+    }
+
+    .connect {
+      opacity: 0.25;
+      pointer-events: none;
+      background-color: var(--dim);
+      border-color: var(--dim);
+    }
+    .disconnect {
+      opacity: 1;
+      pointer-events: all;
+      background-color: #c00;
+      border-color: #900;
+      cursor: pointer;
+    }
+  }
+
+  .buttons.disconnected {
+    .connect {
+      opacity: 1;
+      pointer-events: all;
+      background-color: #0c0;
+      border-color: #090;
+    }
+    .disconnect {
+      opacity: 0.25;
+      pointer-events: none;
+      background-color: var(--dim);
+      border-color: var(--dim);
+    }
+  }
+  .username.disconnected {
+    opacity: 0.25;
+    pointer-events: none;
+  }
+  
+  input {
+    width: 8em;
+  }
+  ul {
+    min-height: 2em;
+    border: 1px inset #fff;
+    margin: 0.5em 0 0;
+    background-color: #444;
+    white-space: pre;
+    color: #999;
+
+    li {
+      padding: 0 0.5em;
+    }
+
+    li:first-line,
+    li::marker {
+      color: white;
+    }
+
+    li:nth-child(even) {
+      --bg: #000;
+      background-color: var(--bg);
+      position: relative;
+
+      /* Fake a black ::marker area */
+      &::before {
+        content: " •";
+        position: absolute;
+        top: 0;
+        left: -40px;
+        width: 40px;
+        height: 100%;
+        text-align: center;
+        font-size: 1.1em;
+        line-height: 1.5em;
+        color: #fff;
+        background-color: var(--bg);
+      }
+    }
+
+    li:nth-child(odd) {
+      background-color: transparent
+    }
+  }
