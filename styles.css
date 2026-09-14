@@ -101,6 +101,7 @@
       pointer-events: all;
       background-color: #0c0;
       border-color: #090;
+      cursor: pointer;
     }
     .disconnect {
       opacity: 0.25;
@@ -117,8 +118,11 @@
   input {
     width: 8em;
   }
+
   ul {
     min-height: 2em;
+    max-height: 20em;
+    overflow: auto;
     border: 1px inset #fff;
     margin: 0.5em 0 0;
     background-color: #444;
@@ -158,4 +162,8 @@
     li:nth-child(odd) {
       background-color: transparent
     }
+  }
+
+  #websocket ul {
+    color: white;
   }
