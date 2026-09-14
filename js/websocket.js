@@ -4,6 +4,10 @@
 
 
 const WS_PATH = "/ws"
+const MIN_DELAY = 250    // 500 1000 2000 4000
+const MID_DELAY = 4000
+const MAX_DELAY = 32000  // 4000 8000 16000 32000
+
 
 ;(function (){
   const div = document.getElementById("websocket")
@@ -19,6 +23,11 @@ const WS_PATH = "/ws"
   let isConnected  = false
   let user_id = ""
   let startMS = 0
+
+  let ping_interval
+  let ping_counter = 0
+  let ping_delay = MID_DELAY
+  const latencies = []
 
 
   connect.addEventListener("click", openSocket)
@@ -54,6 +63,7 @@ const WS_PATH = "/ws"
     socket.onclose   = treatDisconnect
 
     startMS = + new Date()
+    ping_interval = setInterval(ping, ping_delay)
 
     return socket
   }
@@ -86,7 +96,6 @@ const WS_PATH = "/ws"
     try {
       const message = JSON.parse(data)
       handleMessage(message)
-      addMessageToList(message)
 
     } catch(error) {
       console.warn(`ERROR: data could not be converted to an object\n°${data}°`)
@@ -107,14 +116,19 @@ const WS_PATH = "/ws"
   }
 
 
+  // Messages // Messages // Messages // Messages // Messages //
+
   function handleMessage(message) {
     const { sender_id, recipient_id, subject } = message
-    console.log(`handleMessage(${JSON.stringify(message, null, 2)})`)
 
     switch (sender_id) {
       case "SYSTEM":
         return handleSystemMessage(message)
+
     }
+
+    // Other messages
+    console.log(`handleMessage(${JSON.stringify(message, null, 2)})`)
   }
 
 
@@ -125,8 +139,12 @@ const WS_PATH = "/ws"
       case "CONNECTION":
         user_id = recipient_id
         console.log(`user_id set to ${user_id}`)
+        addMessageToList(message)
 
-        break
+      break
+
+      case "PONG":
+        return handlePongMessage(message)
     }
   }
 
@@ -149,16 +167,18 @@ const WS_PATH = "/ws"
         "state:", socket?.readyState,
         user_id
       )
-      return
+      return -1
     }
 
     message.sender_id = user_id
     // console.log("Sending message:", message)
 
     message = JSON.stringify(message)
-    console.log(`sendMessage(${message})`)
+    // console.log(`sendMessage(${message})`)
 
     socket.send(message)
+
+    return 0
   }
 
 
@@ -199,6 +219,38 @@ const WS_PATH = "/ws"
     const action = isConnected ? "remove" : "add"
     buttons.classList[action]("disconnected")
     username.classList[action]("disconnected")
+  }
+
+
+  // Ping // Ping // Ping // Ping / Ping // Ping // Ping // Ping //
+
+  function ping() {
+    ping_counter += 1
+
+    const message = {
+      recipient_id: "SYSTEM",
+      subject: "PING",
+      time: + new Date(),
+      ping_counter
+    }
+
+    const failure = sendMessage(message)
+
+    if (failure) {
+      console.log("PING message not sent:", message)
+    }
+  }
+
+
+  function handlePongMessage(message) {
+    const latency = (+ new Date() - message.time)
+    message = {
+      "ping expected:": ping_counter,
+      "actual": message.ping_counter,
+      latency
+    }
+    console.log("pong", JSON.stringify(message, null, '  '));
+    addMessageToList(message)
   }
 
 
