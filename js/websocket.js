@@ -15,9 +15,10 @@ const WS_PATH = "/ws"
   const username   = div.querySelector(".username")
   const messages   = div.querySelector(".messages")
 
-  let socket
+  let socket  = null
   let isConnected  = false
-  let user_id
+  let user_id = ""
+  let startMS = 0
 
 
   connect.addEventListener("click", openSocket)
@@ -52,12 +53,14 @@ const WS_PATH = "/ws"
     socket.onmessage = treatMessage
     socket.onclose   = treatDisconnect
 
+    startMS = + new Date()
+
     return socket
   }
 
 
   function closeSocket() {
-    socket.close()
+    socket.close(1000, "client action")
     console.log("socket.close() called")
   }
 
@@ -93,6 +96,17 @@ const WS_PATH = "/ws"
   }
 
 
+  function treatDisconnect(event) {
+    console.log("disconnect:", event)
+    const { code, reason, wasClean } = event
+    const uptime = Math.round((+ new Date() - startMS) / 100) / 10
+
+    addMessageToList(`"${event.type}" event received\ncode: ${code}, reason: "${reason}", wasClean: ${wasClean}, uptime: ${uptime}s`)
+    isConnected = false
+    showConnectionStatus()
+  }
+
+
   function handleMessage(message) {
     const { sender_id, recipient_id, subject } = message
     console.log(`handleMessage(${JSON.stringify(message, null, 2)})`)
@@ -114,14 +128,6 @@ const WS_PATH = "/ws"
 
         break
     }
-  }
-
-
-  function treatDisconnect(event) {
-    console.log("disconnect:", event)
-    addMessageToList(`"${event.type}" event received\n(code: ${event.code}, wasClean: ${event.wasClean})`)
-    isConnected = false
-    showConnectionStatus()
   }
 
 
