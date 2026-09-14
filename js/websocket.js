@@ -29,7 +29,10 @@ const TIMEOUT   = 2000
   let ping_timeout = 0
   let ping_delay = MID_DELAY
   let down = 0
+  let max = 0
+  let min = 99999
   const latencies = []
+  const uptimes = []
 
 
   connect.addEventListener("click", openSocket)
@@ -37,15 +40,16 @@ const TIMEOUT   = 2000
   form.addEventListener("submit", logIn)
 
 
-  function setServer(event) {
+  function resetServer(event) {
     if (event) {
       url = event.target.value
     }
 
-    console.log("WebSocket setServer url:", url + WS_PATH)
+    console.log("WebSocket resetServer url:", url + WS_PATH)
 
     if (isConnected && socket) {
-      socket.close()
+      socket.close(1000, "reconnecting")
+      socket = null
     }
 
     socket = openSocket(url)
@@ -58,6 +62,7 @@ const TIMEOUT   = 2000
 
     socket = new WebSocket(url + WS_PATH)
     console.log("openSocket:", socket)
+    addMessageToList("openSocket request")
 
     socket.onopen    = treatConnection
     socket.onerror   = treatError
@@ -66,17 +71,32 @@ const TIMEOUT   = 2000
 
     startMS = + new Date()
     if (down) {
-      console.log(`Down time: ${startMS - down} ms`)
+      const message = `Down time: ${startMS - down} ms`
+      console.log("message:", message)
+      addMessageToList(message)
     }
     ping_interval = setInterval(ping, ping_delay)
+    socket.ping_interval = ping_interval
 
     return socket
   }
 
 
   function closeSocket(code=1000, reason="client action") {
-    socket.close(code, reason)
-    console.log(`socket.close(${code}, ${reason}) called`)
+    const message = `socket.close("${code}", "${reason}") called ${socket ? "for "+socket.user_id : "on null socket"}`
+
+    if (socket) {
+      const oldSocket = socket
+      socket = null
+      isConnected = false
+
+      oldSocket.close(code, reason)
+      const { user_id, ping_interval } = oldSocket
+      clearInterval(ping_interval)
+    }
+
+    console.log(message)
+    addMessageToList(message)
   }
 
 
@@ -91,8 +111,10 @@ const TIMEOUT   = 2000
 
 
   function treatError(event) {
-    console.log("ERROR:", event)
-    addMessageToList(`"${event.type}" event received \nisConnected: ${isConnected}\nsocket.readyState: ${socket ? socket.readyState : "no socket"}`)
+    const message = `socket.error() called at ${new Date().toTimeString().slice(0, 8)} ${socket ? "for "+socket.user_id : "on null socket"}\nisConnected: ${isConnected}\nsocket.readyState: ${socket ? socket.readyState : "no socket"}`
+
+    console.log(message)
+    addMessageToList(message)
 
     showConnectionStatus()
   }
@@ -113,12 +135,17 @@ const TIMEOUT   = 2000
 
   function treatDisconnect(event) {
     console.log("disconnect:", event)
-    const { code, reason, wasClean } = event
-    const uptime = Math.round((+ new Date() - startMS) / 100) / 10
+    const { target, code, reason, wasClean } = event
+    const { user_id, ping_interval } = (target || {
+      user_id: "unknown",
+      ping_interval: -1
+    })
 
-    addMessageToList(`"${event.type}" event received\ncode: ${code}, reason: "${reason}", wasClean: ${wasClean}, uptime: ${uptime}s`)
+    const message = `"${event.type}" event received for ${user_id} (ping_interval: ${ping_interval})\ncode: ${code}, reason: "${reason}", wasClean: ${wasClean}, uptime: ${uptimes.slice(-1)[0] || 0}s`
+    console.log(message)
+    addMessageToList(message)
+
     isConnected = false
-
     clearInterval(ping_interval)
 
     showConnectionStatus()
@@ -147,6 +174,7 @@ const TIMEOUT   = 2000
     switch (subject) {
       case "CONNECTION":
         user_id = recipient_id
+        socket.user_id = recipient_id.slice(0, 8)
         console.log(`user_id set to ${user_id}`)
         addMessageToList(message)
 
@@ -253,33 +281,66 @@ const TIMEOUT   = 2000
 
   function timeoutPing() {
     // A ping message was not answered in time. Show the statistics
-    const maxLatency = Math.max.apply(null, latencies)
-    const minLatency = Math.min.apply(null, latencies)
-    const length = latencies.length
-    const midLatency = length
-      ? latencies.reduce((sum, value) => (
-          sum += value
-        )) / latencies.length
-      : "n/a"
+    let statistics = latencies.length
+      ? getStatistics(latencies, "Latency")
+      : {}
+
+    if (max < (statistics.maxLatency || 0)) {
+      max = statistics.maxLatency
+    }
+    if (min > (statistics.minLatency || 99999)) {
+      min = statistics.minLatency
+    }
+    statistics.min = min
+    statistics.max = max
+
+    // Reset for the next unbroken stretch
+    latencies.length = 0
 
     down = new Date()
+    const uptime = Math.round((down - startMS) / 100) / 10
+    uptimes.push(uptime)
 
-    const statistics = JSON.stringify({
-      maxLatency,
-      midLatency,
-      minLatency,
-      length,
-      down: d.toTimeString().slice(0, 8)
-    }, null, '  ')
+    statistics.uptime = uptime
+    statistics.down_at = down.toTimeString().slice(0, 8)
+
+    statistics = JSON.stringify(statistics, null, 2)
     console.log("statistics:", statistics)
     addMessageToList(statistics)
 
+    const uptimeInfo = JSON.stringify(
+      getStatistics(uptimes, "Uptime"), null, 2
+    )
+    console.log("uptimeInfo:", uptimeInfo)
+    addMessageToList(uptimeInfo)
+
     // Stop pinging until the socket is reopened
     clearInterval(ping_interval)
-    
+
     // Consider that the connection was dropped and restart it.
     closeSocket(1000, "ping timeout")
-    setServer()
+    resetServer()
+  }
+
+
+  function getStatistics(array, label="") {
+    const max = Math.max.apply(null, array)
+    const min = Math.min.apply(null, array)
+    const length = array.length
+    const total = Math.round(array.reduce((sum, value) => (
+      sum += value
+    )))
+    const mid = length
+      ? Math.round(total * 10 / length) / 10
+      : "n/a"
+
+    const statistics = Object.entries(
+      { max, mid, min, length, total }
+    )
+    return statistics.reduce((output, [key, value]) => {
+      output[key+label] = value
+      return output
+    }, {})
   }
 
 
@@ -300,6 +361,6 @@ const TIMEOUT   = 2000
   }
 
 
-  setServer()
+  resetServer()
   showConnectionStatus()
 })()
