@@ -7,6 +7,7 @@ const WS_PATH = "/ws"
 const MIN_DELAY = 250    // 500 1000 2000 4000
 const MID_DELAY = 4000
 const MAX_DELAY = 32000  // 4000 8000 16000 32000
+const TIMEOUT   = 2000
 
 
 ;(function (){
@@ -25,7 +26,7 @@ const MAX_DELAY = 32000  // 4000 8000 16000 32000
   let startMS = 0
 
   let ping_interval
-  let ping_counter = 0
+  let ping_timeout = 0
   let ping_delay = MID_DELAY
   const latencies = []
 
@@ -112,6 +113,9 @@ const MAX_DELAY = 32000  // 4000 8000 16000 32000
 
     addMessageToList(`"${event.type}" event received\ncode: ${code}, reason: "${reason}", wasClean: ${wasClean}, uptime: ${uptime}s`)
     isConnected = false
+
+    clearInterval(ping_interval)
+
     showConnectionStatus()
   }
 
@@ -225,13 +229,13 @@ const MAX_DELAY = 32000  // 4000 8000 16000 32000
   // Ping // Ping // Ping // Ping / Ping // Ping // Ping // Ping //
 
   function ping() {
-    ping_counter += 1
+    ping_timeout = setTimeout(timeoutPing, TIMEOUT)
 
     const message = {
       recipient_id: "SYSTEM",
       subject: "PING",
       time: + new Date(),
-      ping_counter
+      ping_timeout
     }
 
     const failure = sendMessage(message)
@@ -242,14 +246,41 @@ const MAX_DELAY = 32000  // 4000 8000 16000 32000
   }
 
 
+  function timeoutPing() {
+    // A ping message was not answered in time. Show the statistics
+    const maxLatency = Math.max.apply(null, latencies)
+    const minLatency = Math.min.apply(null, latencies)
+    const length = latencies.length
+    const midLatency = length
+      ? latencies.reduce((sum, value) => (
+          sum += value
+        )) / latencies.length
+      : "n/a"
+
+    const statistics = JSON.stringify({
+      maxLatency, midLatency, minLatency, length
+    }, null, '  ')
+    console.log("statistics:", statistics)
+    addMessageToList(statistics)
+    
+    // Consider that the connection was dropped and restart it.
+    setServer()
+  }
+
+
   function handlePongMessage(message) {
-    const latency = (+ new Date() - message.time)
-    message = {
-      "ping expected:": ping_counter,
-      "actual": message.ping_counter,
-      latency
-    }
-    console.log("pong", JSON.stringify(message, null, '  '));
+    const { ping_timeout, time } = message
+
+    // If the message was received before the timeout was triggered
+    // then don't trigger it
+    clearTimeout(ping_timeout)
+
+    const latency = (+ new Date() - time)
+    latencies.push(latency)
+
+    message = `Ping ${ping_timeout} latency: ${latency}`
+    console.log("pong", message);
+
     addMessageToList(message)
   }
 
