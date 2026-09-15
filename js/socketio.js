@@ -16,13 +16,13 @@
   let socket
   let status = "stopped"
 
-  backend.addEventListener("change", setServer)
+  backend.addEventListener("change", resetSocket)
 
-  function setServer(event) {
+  function resetSocket(event) {
     if (event) {
       url = event.target.value
     }
-    console.log("setServer url:", url)
+    console.log("resetSocket url:", url)
 
     if (status === "connected") {
       socket.disconnect()
@@ -52,7 +52,7 @@
 
   function connectSocket() {
     if (!socket) {
-      setServer()
+      resetSocket()
     } else {
       const result = socket.connect()
       console.log("connectSocket:", result )
@@ -150,6 +150,6 @@
     return l
   }
 
-  // setServer()
+  // resetSocket()
   showConnectionStatus()
 })()
