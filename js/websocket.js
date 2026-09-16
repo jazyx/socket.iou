@@ -144,7 +144,7 @@ const PONG_DELAY = 200
    * @param {error event} event
    */
   function treatError({ type, target }) {
-    const message = `socket.${type}() called at ${new Date().toTimeString().slice(0, 8)} for ${target.socket_id }\nisConnected: ${isConnected}\target.readyState: ${target.readyState}`
+    const message = `socket.${type}() called at ${new Date().toTimeString().slice(0, 8)} for ${target.socket_id }\nisConnected: ${isConnected}\ntarget.readyState: ${target.readyState}\nError socket: ${target.socket_id}, Current socket: ${socket.socket_id}`
 
     log(message)
   }
@@ -164,7 +164,7 @@ const PONG_DELAY = 200
       const id = `${socket_id} (${pinger})`
 
       const uptime = Math.round((new Date() - restartMS) / 100)/10
-      const message = `socket.close() called at ${new Date().toTimeString().slice(0, 8)} for ${id}\nsocket.readyState: ${readyState}\ncode: ${code}, reason: "${reason}", wasClean: ${wasClean}\nisConnected: ${isConnected}, uptime: ${uptime}s`
+      const message = `socket.close() called at ${new Date().toTimeString().slice(0, 8)} for ${id}\nsocket.readyState: ${readyState}\ncode: ${code}, reason: "${reason}", wasClean: ${wasClean}\nisConnected: ${isConnected}, uptime: ${uptime}s\nClosing socket: ${target.socket_id}, Current socket: ${socket.socket_id}`
 
       log(message)
     }
