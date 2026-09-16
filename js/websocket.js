@@ -216,6 +216,7 @@ const PONG_DELAY = 200
     const message = `closeSocket("${code}", "${reason}") called ${socket ? "for "+socket.socket_id : "on null socket"}`
 
     log(message)
+    console.log("event:", event)
 
     if (socket) {
       // If called from Disconnect, an outgoing message may still
@@ -224,6 +225,7 @@ const PONG_DELAY = 200
       clearTimeout(pinger)
       // console.log("pinger cleared by closeSocket()", pinger)
 
+      log(`About to call socket.close(${code}, ${reason}) on socket ${socket.socket_id}`)
       socket.close(code, reason)
       // will trigger treatClose() and tell the backend
       socket = null
