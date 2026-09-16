@@ -5,82 +5,56 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <link rel="stylesheet" href="styles.css">
   <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
-  <script defer src="js/script.js"></script>
-  <script defer src="js/socketio.js"></script>
-  <script defer src="js/websocket.js"></script>
+
+  <!-- Create global SocketConsole -->
+  <script defer src="js/socketconsole.js"></script>
+  <!-- Create global GameSocket -->
+  <script defer src="js/gamesocket.js"></script>
+  
+  <script defer src="js/placeholdergame.js"></script>
   <title>Socket MVP</title>
 </head>
 <body>
   <main>
-    <header>
-      <a href="#websocket" class="current">WebSocket</a>
-      <a href="#socket-io">Socket.IO</a>
-    </header>
     <p id="frontend"></p>
     <select id="backend">
-      <option value="http://localhost:6661">http://localhost:6661</option>
-      <option value="https://iou.jazyx.com">https://iou.jazyx.com</option>
+      <option
+        value="http://localhost:6661"
+      >
+        http://localhost:6661
+      </option>
+      <option
+        value="https://iou.jazyx.com"
+        select_ed
+      >
+        https://iou.jazyx.com
+      </option>
     </select>
 
-    <div id="websocket">
-      <p>Connected: <span class="connected"></span></p>
-      <div class="buttons">
-        <button
-          type="button"
-          class="connect"
-        >
-          Connect
-        </button>
-        <button
-          type="button"
-          class="disconnect"
-        >
-          Disconnect
-        </button>
-      </div>
-      <form>
-        <span>Log in as </span>
-        <input
-          class="username"
-          type="text"
-          value="WebSocket"
-        />
-      </form>
-      <ul class="messages"></ul>
+    <p>Connected: <span id="connected"></span></p>
+    <div id="buttons">
+      <button
+        type="button"
+        id="connect"
+      >
+        Connect
+      </button>
+      <button
+        type="button"
+        id="disconnect"
+      >
+        Disconnect
+      </button>
     </div>
-
-    <div id="socket-io">
-      <p>Status: <span class="connected"></span></p>
-      <div class="buttons">
-        <button
-          type="button"
-          class="connect"
-        >
-          Connect
-        </button>
-        <button
-          type="button"
-          class="disconnect"
-        >
-          Disconnect
-        </button>
-        <button
-          type="button"
-          class="stop"
-        >
-          Stop
-        </button>
-      </div>
-      <form>
-        <span>Log in as </span>
-        <input
-          class="username"
-          type="text"
-          value="SocketIO"
-        />
-      </form>
-      <ul class="messages"></ul>
-    </div>
+    <form id="form">
+      <span>Log in as </span>
+      <input
+        id="username"
+        type="text"
+        value="WebSocket"
+      />
+    </form>
+    <ul id="messages"></ul>
   </main>
 </body>
 </html>

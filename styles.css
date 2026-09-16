@@ -5,7 +5,7 @@
     justify-content: center;
     align-items: center;
     color: #ddd;
-    background-color: #242;
+    background-color: #222;
     height: 100vh;
   }
 
@@ -25,36 +25,11 @@
     align-items: center;
     padding: 0 0.5em 0.5em;
     border: 1px inset #fff;
-      border-top: none;
     border-top-left-radius: 0.5em;
     border-top-right-radius: 0.5em;
 
     &:not(:has(:target)) > div:first-of-type {
       display: block;
-    }
-  }
-
-  header {
-    display: flex;
-    justify-content: stretch;
-    width: calc(100% + 1em);
-    margin: 0 -0.5em 0.5em;
-
-    a {
-      padding: 0.25em ;
-      flex: 1;
-      text-align: center;
-      border: 1px outset white;
-      border-top-left-radius: 0.5em;
-      border-top-right-radius: 0.5em;
-      color: #ddd;
-      background-color: #444;
-
-      &.current {
-        border-bottom: none;
-        color: #fff;
-        background-color: transparent;
-      }
     }
   }
 
@@ -67,13 +42,13 @@
     text-align: center;
   }
 
-  .buttons,
+  #buttons,
   form {
     display: flex;
     justify-content: center;
   }
 
-  .buttons {
+  #buttons {
     --dim: #ccc;
     --connect: #090;
     --disconnect: #960;
@@ -84,66 +59,37 @@
       margin: 0.25em;
     }
 
-    .connect {
+    #connect {
       opacity: 0.25;
       pointer-events: none;
       background-color: var(--dim);
       border-color: var(--dim);
     }
-    .disconnect {
+    #disconnect {
       opacity: 1;
       pointer-events: all;
       background-color: var(--disconnect);
       border-color: var(--disconnect);
       cursor: pointer;
     }
-    .stop {
-      opacity: 1;
-      pointer-events: all;
-      background-color: var(--stop);
-      border-color: var(--stop);
-      cursor: pointer;
-    }
   }
 
-  .buttons.disconnected {
-    .connect {
+  #buttons.disconnected {
+    #connect {
       opacity: 1;
       pointer-events: all;
       background-color: var(--connect);
       border-color: var(--connect);
       cursor: pointer;
     }
-    .disconnect {
+    #disconnect {
       opacity: 0.25;
       pointer-events: none;
       background-color: var(--dim);
       border-color: var(--dim);
     }
   }
-
-  .buttons.stopped {
-    .connect {
-      opacity: 1;
-      pointer-events: all;
-      background-color: var(--connect);
-      border-color: var(--connect);
-      cursor: pointer;
-    }
-    .disconnect {
-      opacity: 0.25;
-      pointer-events: none;
-      background-color: var(--dim);
-      border-color: var(--dim);
-    }
-    .stop {
-      opacity: 0.25;
-      pointer-events: none;
-      background-color: var(--dim);
-      border-color: var(--dim);
-    }
-  }
-  .username.disconnected {
+  #username.disconnected {
     opacity: 0.25;
     pointer-events: none;
   }
@@ -195,8 +141,4 @@
     li:nth-child(odd) {
       background-color: transparent
     }
-  }
-
-  #websocket ul {
-    color: white;
   }
