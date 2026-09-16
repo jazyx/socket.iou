@@ -1,28 +1,28 @@
 /**
  * frontend/js/websocket.js
- * 
+ *
  * Each time a socket is created, the server will create a unique
  * socket_id, in order to know which socket to use to communicate
  * with this client. This is not a permanent id that identifies
  * this particular user. It will change each time the connection
  * breaks.
- * 
+ *
  * For the purposes of this proof-of-concept, each user should log
  * in with a unique name. In a real project, the backend will
  * create a User record with a unique key and password, and a
  * possibly non-unique username.
- * 
+ *
  * On startup, `scheduler` is set to the value of a timeout that
  * will trigger the ping() function. This function will send a
  * "PING" message to the backend after a period with no incoming
  * or outgoing messages. That is, it will be rescheduled by any
  * incoming or outgoing messages.
- * 
+ *
  * Any outgoing message (even non-PING messages) will be given a
- * `pinger` and a `time` value. The backend will immediately 
+ * `pinger` and a `time` value. The backend will immediately
  * respond with a "PONG" message, and may send other messages
  * later.
- * 
+ *
  */
 
 
@@ -47,7 +47,7 @@ const PONG_DELAY = 200
   let socket_id = "" // set by backend for sending messages here
                      // Will be updated every time a new socket is
                      // opened.
-  
+
   let scheduler    // value of timeout that triggers next ping()
   let pinger       // value of timeout that triggers missedPong()
   let lastPing     // time a "PING" (or proxy) was last sent
@@ -123,12 +123,13 @@ const PONG_DELAY = 200
 
   /**
    * Sent by the socket when it receives on "open" event
-   * @param {open event} event 
+   * @param {open event} event
    */
   function treatOpen(event) {
     log(`"${event.type}" event received`)
 
     // Create a timeout to trigger ping() after PING_DELAY ms
+    // console.log("treatOpen about to call reschedulePing()")
     reschedulePing() // sets scheduler timeout value
 
     // Show the Connect and Disconnect buttons in the right colours
@@ -140,7 +141,7 @@ const PONG_DELAY = 200
    * Sent by the socket when it receives an "error" event. This
    * will not contain much useful information, and it precedes an
    * unexpected "close" event
-   * @param {error event} event 
+   * @param {error event} event
    */
   function treatError({ type, target }) {
     const message = `socket.${type}() called at ${new Date().toTimeString().slice(0, 8)} for ${target.socket_id }\nisConnected: ${isConnected}\target.readyState: ${target.readyState}`
@@ -153,7 +154,7 @@ const PONG_DELAY = 200
    * Sent by the socket when it receives a "close" event. This may
    * be sent from the backend, from the use of the Disconnect
    * button, or from a missedPong() timeout.
-   * @param {close event} event 
+   * @param {close event} event
    */
   function treatClose(event) {
     const { target, code, reason, wasClean } = event
@@ -171,8 +172,10 @@ const PONG_DELAY = 200
     // If the close event was unexpected, or was triggered by the
     // Disconnect button, an outgoing message may still be waiting
     // for a "PONG" echo. If the event was sent from missedPong(),
-    // that timeout will already have been triggered
+    // that timeout will already have been triggered.
     clearTimeout(pinger)
+    // console.log("pinger cleared by treatClose()", pinger)
+
 
     // Show the Connect and Disconnect buttons in the right colours
     showConnectionStatus(false)
@@ -181,10 +184,11 @@ const PONG_DELAY = 200
 
   function treatMessage({ data }) {
     // An incoming message is proof that the WebSocket connection
-    // was working up until this moment. Cancel missedPong()
-    // timeout, since it won't be needed, and reset the scheduler.
-    clearTimeout(pinger)
-    reschedulePing()
+    // was working up until this moment. handleMessage() will
+    // always call handleACKMessage, which will cancel the
+    // missedPong() timeout if the message contains a value for
+    // pinger.
+    // handleMessage() will always call reschedulePing()
 
     try {
       const message = JSON.parse(data)
@@ -202,10 +206,10 @@ const PONG_DELAY = 200
   /**
    * Sent manually by the Disconnect button, or by missedPong()
    * @param {mixed} event will be a click event, only if the call
-   *   came from the Disconnect button. It is ignored. 
-   * @param {mixed} code will only have a value if sent by 
+   *   came from the Disconnect button. It is ignored.
+   * @param {mixed} code will only have a value if sent by
    *   missedPong(), in which case it will be 100
-   * @param {mixed} reason will only have a value if sent by 
+   * @param {mixed} reason will only have a value if sent by
    *   missedPong(), in which case it will be "ping timed out"
    */
   function closeSocket(event, code=1000, reason="client action") {
@@ -216,8 +220,9 @@ const PONG_DELAY = 200
     if (socket) {
       // If called from Disconnect, an outgoing message may still
       // be waiting for a "PONG" echo. If called from missedPong()
-      // that timeout will already have been triggered
+      // that timeout will already have been triggered.
       clearTimeout(pinger)
+      // console.log("pinger cleared by closeSocket()", pinger)
 
       socket.close(code, reason)
       // will trigger treatClose() and tell the backend
@@ -234,15 +239,23 @@ const PONG_DELAY = 200
   // Messages // Messages // Messages // Messages // Messages //
 
   /**
-   * 
-   * @param {object} message 
+   *
+   * @param {object} message
    */
   function handleMessage(message) {
-    const { sender_id, recipient_id, subject } = message
+    const { sender_id, pinger, time } = message
 
-    // Any incoming message acts as a "PONG", in that it proves
-    // that the connection was working an instant ago. It will
-    // always receive an ACK(nowledgement)
+    // Any incoming message is a proof of life. Get ready to send
+    // a new "PING" message if there is no other traffic for a
+    // while.
+    // console.log("handleMessage about to call reschedulePing()")
+    reschedulePing()
+
+    // Any previous outgoing message acts as a "PING", in that the
+    // server will respond with an "ACK"nowledgement, where the
+    // pinger and time properties will be set. If this is the case,
+    // clearTimeout(pinger) can be called to prevent an unnecessary
+    // reconnection process.
     handleACKMessage(message)
 
     switch (sender_id) {
@@ -251,7 +264,7 @@ const PONG_DELAY = 200
     }
 
     // Other messages are not treated yet
-    console.log(`handleMessage(${JSON.stringify(message, null, 2)})`)
+    // console.log(`handleMessage(${JSON.stringify(message, null, 2)})`)
   }
 
 
@@ -260,7 +273,7 @@ const PONG_DELAY = 200
       case "CONNECTION":
         socket_id = message.recipient_id
         socket.socket_id = socket_id.slice(0, 8)
-        log(`socket_id set to ${socket.socket_id}\n${JSON.stringify(message, null, 2)}`)
+        log(`handleSystemMessage(): socket_id set to ${socket.socket_id}\n${JSON.stringify(message, null, 2)}`)
 
       break
       case "LOGGED_IN":
@@ -296,9 +309,10 @@ const PONG_DELAY = 200
     lastPing = +new Date()
     message.time = lastPing
     pinger = message.pinger = setTimeout(missedPong, PONG_DELAY)
+    // console.log("pinger set by sendMessage()", pinger, new Date().toTimeString().slice(0, 8))
 
+    // log(`sendMessage(${JSON.stringify(message, null, 2)})`)
     message = JSON.stringify(message)
-    // console.log(`sendMessage(${message})`)
 
     socket.send(message)
 
@@ -331,7 +345,10 @@ const PONG_DELAY = 200
    */
   function reschedulePing() {
     clearTimeout(scheduler)
+    // console.log("scheduler cleared by reschedulePing()", scheduler, new Date().toTimeString().slice(0, 8))
+
     scheduler = setTimeout(ping, PING_DELAY)
+    // console.log("scheduler set by reschedulePing()", scheduler)
   }
 
 
@@ -360,21 +377,18 @@ const PONG_DELAY = 200
     const { pinger, time } = message
 
     // ALERT: messages broadcast from a third party MUST NOT have
-    // a pinger value
+    // a pinger value.
     if (pinger) {
       clearTimeout(pinger)
-    }
-    
-    // Get ready to send a new "PING" message if there is no other
-    // traffic for a while
-    reschedulePing()
+      // console.log("pinger cleared by handleACKMessage()", pinger, new Date().toTimeString().slice(0, 8))
 
-    if (showWorking && time) {
-      const latency = (+ new Date() - time)
-      latencies.push(latency)
+      if (showWorking && time) {
+        const latency = (+ new Date() - time)
+        latencies.push(latency)
 
-      message = `Ping ${pinger} latency: ${latency}`
-      log(message)
+        message = `Ping ${pinger} latency: ${latency}`
+        log(message)
+      }
     }
   }
 
