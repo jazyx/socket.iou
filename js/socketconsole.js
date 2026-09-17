@@ -12,6 +12,7 @@
 
   const connected  = document.getElementById("connected")
   const buttons    = document.getElementById("buttons")
+  const toggleWait = document.getElementById("toggleWait")
   const start      = document.getElementById("connect")
   const stop       = document.getElementById("disconnect")
   const form       = document.getElementById("form")
@@ -22,11 +23,13 @@
 
 
   function createSocketConsole() {
-    let connect    = () => {}
-    let disconnect = () => {}
-    let send       = () => {}
-    let on         = () => {}
-    let off        = () => {}
+    let connect      = () => {}
+    let disconnect   = () => {}
+    let send         = () => {}
+    let startWaiting = () => {}
+    let stopWaiting  = () => {}
+    let on           = () => {}
+    let off          = () => {}
     const cancel = {
 
     }
@@ -34,6 +37,21 @@
     start.addEventListener("click", () => connect())
     stop.addEventListener("click",  () => disconnect())
     form.addEventListener("submit", logIn)
+    toggleWait.addEventListener("click", toggleWaiting)
+
+    let waiting = false
+
+
+    function toggleWaiting(param) {
+      waiting = !waiting
+      if (waiting) {
+        startWaiting()
+        toggleWait.textContent = "Is WAITING"
+      } else {
+        stopWaiting()
+        toggleWait.textContent = "Is IDLE"
+      }
+    }
 
 
     function logIn(event) {
@@ -68,6 +86,8 @@
         connect,
         disconnect,
         send,
+        startWaiting,
+        stopWaiting,
         on,
         off
       } = api)
@@ -80,14 +100,14 @@
       // "state"
       // "reconnect"
 
-      cancel["message"] = on("message", handleMessage)
+      // cancel["message"] = on("message", handleMessage)
     }
 
 
     function handleMessage(message) {
       // if (message.subject === "ACK") { return }
 
-      log("message:", message)
+      log("incoming", message)
     }
 
 
@@ -127,6 +147,10 @@
 
 
     function log(label, data) {
+      if (data === "#now") {
+        data = getTime()
+      }
+
       if (!data) {
         console.log(label)
         addMessageToList(label)

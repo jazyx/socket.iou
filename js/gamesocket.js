@@ -26,37 +26,24 @@
  * messages depends on the user's current state:
  *
  * + IDLE (not actively involved in the game)
- * + AWAITING incoming messages
- * + ACTIVE (making moves)
+ * + WAITING incoming messages
+ * + ACTIVE (sending outgoing messages)
  *
  * This WebSocket client will:
  *
  *  + Send a heartbeat message every 25-30 seconds in IDLE mode
  *    to ensure the connection remains open
- *  + Probe the server every few seconds in AWAITING mode
- *  + Request an ACK(nowledgement) of all outgoing messages when in
- *    ACTIVE mode, and will reconnect and resend any messages that
- *    do not receive an ACK response within a reasonable time.
+ *  + Send a heartbeat every second or so in WAITING mode
+ *  + Request an ACK(nowledgement) of all outgoing messages, and
+ *    will reconnect and resend any messages that do not receive
+ *    an ACK response within a reasonable time.
+ *  + A user-initiated message that failed to receive an ACK will
+ *    be resent with the same corr(elation id), so that the server
+ *    can ignore it if it was already treated (idempotency).
  *
- * The timeout delay will be calculated dynamically based on the
- * longest response time over the past few cycles.
- *
- * Constant "probe" messages will drain the battery of a mobile
- * device, so these are only sent:
- *
- *  - If there have been recent disconnections
- *  - When the user is passively AWAITING incoming messages
- *
- * On a stable network, a disconnection may occur unexpectedly
- * after a long period of tranquillity. The slow heartbeat messages
- * will eventually pick up on this, but other players may be
- * unable to continue the game until it is fixed. The game
- * interface should include a Restore Connection button that the
- * user can press if notified by other players of the need.
- *
- * The probe frequency will restart high after any disconnection,
- * but will slow down if the connection remains stable for a long
- * time.
+ * The heartbeat delay will be calculated dynamically based on the
+ * longest response time over the past few cycles, and the current
+ * state (IDLE or WAITING).
  *
  * ////////////////////////////////////////////////////////////// *
  * A separate WebSocket server script handles these features:
@@ -65,6 +52,8 @@
  *    connected users
  *  + Maintaining a centralised game state that is updated by all
  *    incoming player actions
+ *  + Checking the corr value of any incoming message, and ignoring
+ *    duplicates after an initial treatment
  *  + Resending the entire game state each time a new connection
  *    is made
  * ////////////////////////////////////////////////////////////// *
@@ -78,15 +67,17 @@
 
   const DEFAULTS = {
     path:            "/ws",
-    keepaliveMs:     30000,
-    probeFloorMs:    2000,
-    probeCeilMs:     15000,
-    probeRttFactor:  3,
-    probeMaxMisses:  2,
-    reconnectBaseMs: 1000,
-    reconnectMaxMs:  30000,
-    latencyWindow:   20,
-    ackTimeoutMs:    5000,
+    // Heartbeat rates and RTT tolerance
+    keepaliveMs:     30000, // when little traffic is expected
+    pulseFloorMs:    1000,  // every second when expecting incoming
+    pulseCeilMs:     15000, // allows 5000ms RTT on slow connection
+    pulseRTTFactor:  3,
+    pulseMaxMisses:  2,
+    latencyWindow:   20,    // max length of latencies array
+    ackTimeoutMs:    1000,  // adjusted depending on latencies
+    // Staggering reconnection attempts
+    reconnectBaseMs: 250,   // 500, 1000, 2000, 4000, 8000, 16000,
+    reconnectMaxMs:  32000, // after 8 attempts or 63.75 seconds
 
     // Console
     c: {
@@ -106,13 +97,15 @@
       throw new Error("GameSocket: url is required")
     }
 
+
     // INTERNAL STATE //
 
     let socket       = null
     let generation   = 0
     let socketId     = ""
-    let state        = "IDLE"     // IDLE | AWAITING | RECONNECTING
-    let reconnectMs  = opts.reconnectBaseMs
+    let state        = "IDLE" // IDLE | WAITING | RECONNECTING
+    let ackTimeoutMs = opts.ackTimeoutMs
+    let reconnectMs  = opts.reconnectBaseMs // pause till reconnect
     let reconnectTmr = null
     let closedByUser = false
 
@@ -125,24 +118,28 @@
       open:      new Set(),
       close:     new Set(),
       error:     new Set(),
-      message:   new Set(),
+      message:   new Set(), // emits for incoming non-PING
+      pending:   new Set(), // emits "sent" and "acknowledged"
       state:     new Set(),
       reconnect: new Set(),
+      retrying:  new Set(), // each time _scheduleReconnect called
     }
 
 
     // PUBLIC API //
     const api = {
-      setURL,
+      cpr,
       connect,
       disconnect,
+      isConnected,
       // Messages
       send,
       // State
-      enterAwaiting,
-      exitAwaiting,
-      getState:    () => state,
-      isConnected,
+      startWaiting,
+      stopWaiting,
+      getState: () => state,
+      // Logged in user
+      getUser: () => ({ user_name, user_id }),
       // Listeners
       on,
       off,
@@ -155,12 +152,14 @@
 
     function on(event, fn) {
       if (!listeners[event]) {
-        // "open"
-        // "close"
-        // "error"
-        // "message"
-        // "state"
-        // "reconnect"
+        // open
+        // close
+        // error
+        // message
+        // pending
+        // state
+        // reconnect
+        // retrying
         throw new Error(`unknown event: ${event}`)
       }
 
@@ -191,8 +190,17 @@
 
     // LIFECYCLE //
 
-    function setURL() {
-      // NOT REQUIRED ON VOYAGE; exercise for the reader
+    function cpr() {
+      // If there is an active socket, sends a manual PING, which
+      // will call _scheduleReconnect() immediately if it fails to
+      // be acknowledged. If there is no active socket, requests
+      // a reconnection.
+      if (socket) {
+        _schedulePulse(socket, true)
+
+      } else {
+        _setState("RECONNECTING") // ignored if RECONNECTING now
+      }
     }
 
 
@@ -206,7 +214,7 @@
       closedByUser = true
       _teardown("user disconnect", 1000)
       _cancelReconnect()
-      _setState("IDLE")
+      _setState("IDLE") // "DOWN"
     }
 
 
@@ -217,10 +225,13 @@
       const ws    = new WebSocket(opts.url + opts.path)
 
       ws._gen        = myGen
-      ws._ackTimer   = null
-      ws._probeTimer = null
-      ws._keepTimer  = null
-      ws._probeMiss  = 0
+      // Timeout values
+      ws._ackTimer   = null // timeout to trigger on missed ACK
+      ws._pulseTimer = null // timeout to send next ping
+      // Number of pulse messages that did not get acknowledged
+      ws._ackMiss    = 0
+      // Promises waiting for ACK
+      // { corr => { resolve, timer, reject }, ... }
       ws._pending    = new Map()
 
       ws.onopen      = (e) => _onOpen(ws, e)
@@ -228,6 +239,7 @@
       ws.onclose     = (e) => _onClose(ws, e)
       ws.onmessage   = (e) => _onMessage(ws, e)
 
+      // Adopt this ws as the currently active socket
       socket = ws
       _emit("reconnect", { generation: myGen, reason })
 
@@ -257,10 +269,10 @@
 
     function _clearTimers(ws) {
       clearTimeout(ws._ackTimer)
-      clearTimeout(ws._probeTimer)
-      clearTimeout(ws._keepTimer)
-      ws._ackTimer = ws._probeTimer = ws._keepTimer = null
+      clearTimeout(ws._pulseTimer)
+      ws._ackTimer = ws._pulseTimer = null
 
+      // ws.pending is { corr => { resolve, timer, reject }, ... }
       for (const { timer } of ws._pending.values()) {
         clearTimeout(timer)
       }
@@ -278,15 +290,16 @@
       reconnectMs = opts.reconnectBaseMs
 
       _setState("IDLE")
-      _scheduleKeepalive(ws)
+      _schedulePulse(ws, "_onOpen")
       _emit("open", { generation: ws._gen })
 
       opts.c.showStatus(isConnected())
     }
 
 
-    function _onError () {
-
+    function _onError(ws) {
+      if (ws !== socket) return
+      _emit("error", { generation: ws._gen })
     }
 
 
@@ -315,33 +328,35 @@
       _setState("RECONNECTING")
     }
 
-
-    function _onMessage (ws, { data }) {
+    function _onMessage(ws, { data }) {
       if (ws !== socket) { return }
 
-      let msg
-      try { msg = JSON.parse(data) } catch { return }
+      let message
+      try { message = JSON.parse(data) } catch { return }
 
-      // Any inbound message proves liveness.
-      ws._probeMiss = 0
-      clearTimeout(ws._probeTimer)
-      ws._probeTimer = null
-      _scheduleKeepalive(ws)
+      // Any inbound message proves liveness
+      ws._ackMiss = 0
+      clearTimeout(ws._pulseTimer)
+      ws._pulseTimer = null
+      // Wait a while before sending a new keepalive message
+      _schedulePulse(ws, "_onMessage")
 
-      // Handle ACK and SYSTEM messages only internally
-      if (msg.subject === "ACK" && msg.corr) {
-       return  _settleAck(ws, msg)
+      // Handle ACK and private SYSTEM messages only internally
+      if (message.subject === "ACK" && message.corr) {
+        return _settleAck(ws, message)
 
-      } else if (msg.sender_id === "SYSTEM") {
+      } else if (message.sender_id === "SYSTEM") {
         // CONNECTION, LOGGED_IN, ...?
-        const share = _treatSystemMessage(msg)
+        const share = _treatSystemMessage(message)
         if (!share) {
           return
         }
       }
 
       // Neither ACK nor unshared SYSTEM
-      _emit("message", msg)
+      _emit("message", message)
+
+      opts.c.log("incoming", message)
     }
 
 
@@ -349,144 +364,34 @@
       switch (message.subject) {
         case "CONNECTION":
           socketId = message.recipient_id
-          opts.c.log("socketId", `${socketId.slice(0, 8)}…`)
-          break
+          opts.c.log("socketId set to", `${socketId.slice(0, 8)}…`)
+          break // status available through isConnected()
 
         case "LOGGED_IN":
           ({ user_id, user_name } = message)
+
           opts.c.log(`user_name: ${user_name}${user_id ? ", user_id: "+user_id : ""}`)
-          return true
+          return true // app listeners may want to know
       }
 
       return false
     }
 
 
-    // STATE MACHINE //
-
-    function isConnected() {
-      return !!socket && socket.readyState === WebSocket.OPEN
-    }
-
-
-    function _setState () {
-
-    }
-
-
-    function enterAwaiting() {
-
-    }
-
-
-    function exitAwaiting() {
-
-    }
-
-
-    // KEEPALIVE / IDLE
-
-    function _scheduleKeepalive(ws) {
-      clearTimeout(ws._keepTimer)
-
-      const confirmAlive = () => {
-        if (ws !== socket) { return }
-
-        ws._keepTimer = null
-
-        send({ subject: "PING" }, "keepAlive")
-        _scheduleKeepalive(ws)
-      }
-
-      ws._keepTimer = setTimeout(confirmAlive, opts.keepaliveMs)
-    }
-
-
-    // PROBE / AWAITING
-
-    function _scheduleProbe () {
-
-    }
-
-
-    function _probeInterval () {
-
-    }
-
-
-    // RECONNECT //
-
-    function _scheduleReconnect () {
-
-    }
-
-
-    function _cancelReconnect () {
-
-    }
-
-
-    // SENDING //
-
-    function send(payload, label, timeoutMs = opts.ackTimeoutMs) {
-      if (typeof label === "number") {
-        timeoutMs = label
-        label = ""
-      }
-
-      return new Promise((resolve, reject) => {
-        if (!socketId
-         || !socket
-         || socket.readyState !== WebSocket.OPEN
-        ) {
-          reject(new Error("socket not ready"))
-          return
-        }
-
-        const corr  = crypto.randomUUID()
-        const timer = setTimeout(() => {
-          socket._pending.delete(corr)
-          reject(new Error("ACK timeout"))
-        }, timeoutMs)
-
-        socket._pending.set(corr, { resolve, timer, reject })
-        const message = {
-          ...payload,
-          sender_id: socketId,
-          corr,
-          time: Date.now(),
-        }
-
-        _sendRaw(socket, message)
-
-        opts.c.log(label || "outgoing", message)
-      })
-    }
-
-
-    function _settleAck (ws, msg) {
-      const pending = ws._pending.get(msg.corr)
+    function _settleAck (ws, message) {
+      const pending = ws._pending.get(message.corr)
       if (!pending) { return }
 
-      ws._pending.delete(msg.corr)
+      ws._pending.delete(message.corr)
       clearTimeout(pending.timer)
 
-      if (typeof msg.time === "number") {
-        _recordLatency(msg.time)
+      if (typeof message.time === "number") {
+        _recordLatency(message.time)
       }
 
-      pending.resolve(msg)
-    }
+      pending.resolve(message)
 
-
-    function _sendRaw (ws, msg) {
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        // Was already checked in _send(), so not applicable
-        return false
-      }
-
-      ws.send(JSON.stringify(msg))
-      return true
+      _emit("pending", { message, acknowledged: true })
     }
 
 
@@ -501,6 +406,193 @@
       }
 
       opts.c.log("ACK", ms)
+    }
+
+
+    // STATE MACHINE //
+
+    function isConnected () {
+      return !!socket && socket.readyState === WebSocket.OPEN
+    }
+
+
+    function _setState (next) {
+      if (state === next) { return }
+
+      const prev = state
+      state = next
+
+      if (socket && (next === "IDLE" || next === "WAITING")) {
+        clearTimeout(socket._pulseTimer)
+        socket._pulseTimer = null
+        socket._ackMiss  = 0
+        _schedulePulse(socket, "_setState")
+      }
+
+      if (next === "RECONNECTING") {
+        // The connection was dropped and should soon reopen
+        _scheduleReconnect()
+      }
+
+      _emit("state", { from: prev, to: next })
+
+      opts.c.log(`_setState: ${next}`, "#now")
+    }
+
+
+    /**
+     * An external script requested a higher frequency of checks
+     * so the client can be sure of receiving incoming messages
+     */
+    function startWaiting() {
+      if (state === "RECONNECTING") { return }
+
+      _setState("WAITING")
+    }
+
+
+    /**
+     * An external script considers that incoming messages are not
+     * a high priority for now. Outgoing messages will serve to
+     * check that the connection is still alive.
+     */
+    function stopWaiting() {
+      if (state === "WAITING") {
+        _setState("IDLE")
+      }
+    }
+
+
+    // KEEPALIVE / IDLE (slow) / PULSE (fast if WAITING)
+
+    /**
+     * Sent by _onOpen cpr _setState _onMessage _scheduleReconnect
+     * @param {socket} ws
+     * @returns
+     */
+    function _schedulePulse(ws, from) {
+      if (ws !== socket) { return }
+
+      clearTimeout(ws._pulseTimer)
+
+      const confirmPulse = () => {
+        if (ws !== socket) {
+          // A new socket is already active
+          return
+        }
+
+        ws._pulseTimer = null
+
+        if (ws._ackMiss >= opts.pulseMaxMisses) {
+          _setState("RECONNECTING")
+          return
+        }
+
+        ws._ackMiss++
+        send({ subject: "PING" })
+        // opts.c.log(`confirmPulse timeout (${state})`, "#now")
+
+        // _schedulePulse(ws, "confirmPulse")
+      }
+
+      const delay = _pulseInterval("_schedulePulse")
+      ws._pulseTimer = setTimeout(confirmPulse, delay)
+
+      // opts.c.log(`_schedulePulse (delay: ${delay})`, "#now")
+    }
+
+
+    function _setAckTimeout(from) {
+      if (latencies.length < 3) {
+        return opts.ackTimeoutMs
+      }
+
+      const sorted = [...latencies].sort((a, b) => a - b)
+      const p95    = sorted[Math.floor(sorted.length * 0.95)]
+      ackTimeoutMs = p95 * opts.pulseRTTFactor
+
+      opts.c.log(`ackTimeoutMs`, ackTimeoutMs)
+    }
+
+
+    function _pulseInterval (from) {
+      if (state === "IDLE") {
+        return opts.keepaliveMs // slow
+      }
+
+      // opts.c.log(`_pulseInterval`)
+      // When WAITING, check pulse much more frequently, depending
+      // on the expected Round Trip Time
+
+      _setAckTimeout("_pulseInterval")
+      return Math.min(opts.pulseCeilMs,
+             Math.max(opts.pulseFloorMs, ackTimeoutMs))
+    }
+
+
+    // RECONNECT //
+
+    /**
+     * Sent when _setState("RECONNECTING") is called, which occurs
+     * in _onClose() and _schedulePulse after an ACK response is
+     * missed. If the _openSocket() attempt fails, _onClose() will
+     * be called again, but reconnectMs will have increased, to
+     * give the server progressively more time to react.
+     */
+    function _scheduleReconnect () {
+      _cancelReconnect()
+
+      reconnectTmr = setTimeout(() => {
+        reconnectTmr = null
+        _openSocket("reconnect timer")
+      }, reconnectMs)
+
+      // Wait longer before next reconnect attempt
+      reconnectMs = Math.min(opts.reconnectMaxMs, reconnectMs * 2)
+
+      _emit("retrying", { reconnectMs} )
+    }
+
+
+    function _cancelReconnect() {
+      clearTimeout(reconnectTmr)
+      reconnectTmr = null
+    }
+
+
+    // SENDING //
+
+    function send(payload) {
+      return new Promise((resolve, reject) => {
+        if (!socketId
+         || !socket
+         || socket.readyState !== WebSocket.OPEN
+        ) {
+          reject(new Error("socket not ready"))
+          return
+        }
+
+        const corr  = crypto.randomUUID()
+        const timer = setTimeout(() => {
+          socket._pending.delete(corr)
+          reject(new Error("ACK timeout"))
+        }, ackTimeoutMs)
+
+        socket._pending.set(corr, { resolve, timer, reject })
+        const message = {
+          ...payload,
+          sender_id: socketId,
+          corr,
+          time: Date.now(),
+        }
+
+        socket.send(JSON.stringify(message))
+
+        if (message.subject !== "PING") {
+          _emit("pending", { message, acknowledged: false })
+          opts.c.log("outgoing", message)
+        }
+      })
     }
   }
 
