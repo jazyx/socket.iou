@@ -18,6 +18,8 @@
   const form       = document.getElementById("form")
   const username   = document.getElementById("username")
   const messages   = document.getElementById("messages")
+  const rsvp       = document.getElementById("rsvp")
+  const clear       = document.getElementById("clear")
 
   frontend.textContent = location.origin
 
@@ -38,8 +40,33 @@
     stop.addEventListener("click",  () => disconnect())
     form.addEventListener("submit", logIn)
     toggleWait.addEventListener("click", toggleWaiting)
+    rsvp.addEventListener("click", requestResponse)
+    clear.addEventListener("click", clearMessages)
 
     let waiting = false
+    let counter = 0
+
+
+    function clearMessages() {
+      while (messages.firstChild) {
+        messages.removeChild(messages.firstChild)
+      }
+    }
+
+
+    function requestResponse() {
+      const promise = send({
+        subject: "RSVP",
+        text: `Message ${counter++}`,
+      }, 2000)
+      console.log("promise:", promise)
+      promise.then(response => {
+          log("resolved", response)
+        })
+        .catch(error => {
+          log("REJECTED", error)
+        })
+    }
 
 
     function toggleWaiting(param) {
@@ -96,18 +123,67 @@
       // "open"
       // "close"
       // "error"
-      // "message"
+      // "incoming"
+      // "pending"
       // "state"
       // "reconnect"
+      // "retrying"
+open:     
+close:    
+error:    
+incoming: 
+pending:  
+state:    
+reconnect:
+retrying: 
 
-      // cancel["message"] = on("message", handleMessage)
+      cancel["open"] = on("open", handleOpen)
+      cancel["close"] = on("close", handleClose)
+      cancel["error"] = on("error", handleError)
+      cancel["incoming"] = on("incoming", handleIncoming)
+      cancel["pending"] = on("pending", handleRSVP)
+      cancel["state"] = on("state", handleState)
+      cancel["reconnect"] = on("reconnect", handlвReconnect)
+      cancel["retrying"] = on("retrying", handleRetrying)
+    }
+
+    function handleOpen(message) {
+      log("open", message)
     }
 
 
-    function handleMessage(message) {
-      // if (message.subject === "ACK") { return }
+    function handleClose(message) {
+      log("close", message)
+    }
 
+
+    function handleError(message) {
+      log("error", message)
+    }
+
+
+    function handleState(message) {
+      log("state", message)
+    }
+
+
+    function handlвReconnect(message) {
+      log("reconnect", message)
+    }
+
+
+    function handleRetrying(message) {
+      log("retrying", message)
+    }
+
+
+    function handleIncoming(message) {
       log("incoming", message)
+    }
+
+
+    function handleRSVP(message) {
+      log("pending", message)
     }
 
 
@@ -162,8 +238,8 @@
 
 
     function truncate(key, value) {
-      if (typeof value === "string" && value.length > 9) {
-        value = `${value.slice(0, 8)}…`
+      if (typeof value === "string" && value.length > 16) {
+        value = `${value.slice(0, 15)}…`
       }
       
       return value 
