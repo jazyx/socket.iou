@@ -32,9 +32,11 @@
     let stopWaiting  = () => {}
     let on           = () => {}
     let off          = () => {}
-    const cancel = {
 
-    }
+    const cancel = {}
+
+    let startMs = 0
+    let stopMs  = 0
 
     start.addEventListener("click", () => connect())
     stop.addEventListener("click",  () => disconnect())
@@ -90,7 +92,13 @@
         subject: "LOG_IN",
         recipient_id: "SYSTEM",
         user_name: username.value
-      })
+      }, 1000)
+      .then(response => (
+        log("logIn resolved", response)
+      ))
+      .catch(error => (
+        log("logIn rejected", error, "red")
+      ))
     }
 
 
@@ -103,7 +111,7 @@
       showStatus: showConnectionStatus,
       log,
       logCall:    logMethodCall,
-      statistics: showStatistics,
+      statistics: showStatistics
     }
 
 
@@ -126,39 +134,43 @@
       // "incoming"
       // "pending"
       // "state"
-      // "reconnect"
-      // "retrying"
+      // "info"
+      // "warn"
 open:     
 close:    
 error:    
 incoming: 
 pending:  
 state:    
-reconnect:
-retrying: 
+info:
+warn: 
 
       cancel["open"] = on("open", handleOpen)
       cancel["close"] = on("close", handleClose)
-      cancel["error"] = on("error", handleError)
       cancel["incoming"] = on("incoming", handleIncoming)
       cancel["pending"] = on("pending", handleRSVP)
       cancel["state"] = on("state", handleState)
-      cancel["reconnect"] = on("reconnect", handlвReconnect)
-      cancel["retrying"] = on("retrying", handleRetrying)
+
+      cancel["error"] = on("error", handleError)
+      cancel["warn"] = on("warn", handleWarn)
+      cancel["info"] = on("info", handleInfo)
     }
 
     function handleOpen(message) {
       log("open", message)
+      showConnectionStatus(true)
     }
 
 
+    /**
+     * Called by:
+     *  + manual disconnect()
+     *  + automatic _onClose() when socket has handled its closure
+     *  + _abandonSocket when connection is deemed broken
+     * */
     function handleClose(message) {
       log("close", message)
-    }
-
-
-    function handleError(message) {
-      log("error", message)
+      showConnectionStatus(false)
     }
 
 
@@ -167,13 +179,18 @@ retrying:
     }
 
 
-    function handlвReconnect(message) {
-      log("reconnect", message)
+    function handleError(message) {
+      log("error", message, "red")
     }
 
 
-    function handleRetrying(message) {
-      log("retrying", message)
+    function handleWarn(message) {
+      log("warn", message, "orange")
+    }
+
+
+    function handleInfo(message) {
+      log("info", message, "green")
     }
 
 
@@ -222,17 +239,17 @@ retrying:
     }
 
 
-    function log(label, data) {
+    function log(label, data, color) {
       if (data === "#now") {
         data = getTime()
       }
 
       if (!data) {
         console.log(label)
-        addMessageToList(label)
+        addMessageToList({ label, color })
       } else {
         console.log(label, data)
-        addMessageToList(label, data)
+        addMessageToList({ label, data, color })
       }
     }
 
@@ -246,7 +263,7 @@ retrying:
     }
 
 
-    function addMessageToList(label, data) {
+    function addMessageToList({ label, data, color }) {
       if (!data) {
         data = label
         label = ""
@@ -268,6 +285,9 @@ retrying:
 
       const li = document.createElement("li")
       li.textContent = `${label ? label+": " : ""}${data}`
+      if (color) {
+        li.className = color
+      }
 
       const scrolledToBottom = messages.scrollHeight
                               - messages.scrollTop

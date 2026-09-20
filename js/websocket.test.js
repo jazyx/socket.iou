@@ -191,10 +191,10 @@ describe("handshake", () => {
     expect(ws.sent.find(m => m.subject === "LOG_IN")).toBeUndefined()
   })
 
-  test("LOGGED_IN stores the user and emits 'message'", () => {
+  test("LOGGED_IN stores the user and emits 'pending'", () => {
     const gs = setup()
     const onMessage = jest.fn()
-    gs.on("message", onMessage)
+    gs.on("pending", onMessage)
 
     const ws = openAndHandshake(gs)
     ws._message({
@@ -304,7 +304,8 @@ describe("ACK timeout and retry", () => {
     const ws2 = lastSocket()
     expect(ws2).not.toBe(ws1)
     ws2._open()
-    ws2._message({ sender_id: "SYSTEM", subject: "CONNECTION", recipient_id: "sid-2" })
+    /// JN: CONNECTION  => LOGGED_ID
+    ws2._message({ sender_id: "SYSTEM", subject: "LOGGED_IN", recipient_id: "sid-2" })
 
     // The queued message should have been resent on ws2
     expect(ws2.sent.find(m => m.corr === corr)).toBeDefined()
@@ -455,6 +456,8 @@ describe("rsvp", () => {
     ws._message({ sender_id: "SERVER", subject: "STATE", corr, board: "..." })
 
     const result = await p
+    console.log("\n*******", JSON.stringify(p, null, '  '), "\n*******\n");
+    
     expect(result.reason).toBe("handled")
   })
 

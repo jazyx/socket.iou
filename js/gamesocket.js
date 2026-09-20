@@ -60,22 +60,25 @@
  *
  * A script can call send() with an object payload and either with
  * or without an rsvp integer timeout delay.
- * 
+ *
  * Each outgoing message is identified by a unique corr(elation
  * id). Any response from the server will include the same corr.
- * 
+ *
  * The caller will receive a Promise. This will resolve if:
  *   + The message is acknowledged by the server, and no rsvp
  *     timeout delay was given
  *   + The message was handled by the server, which sent a custom
  *     response, using the same corr.
- * 
+ *
  * The Promise will reject if the message could not be sent, did
  * not receive any acknowledgement from the server, or did not
  * receive a requested rsvp message after a delay of
  * opts.stopTryingMs (default: 2 minutes).
- * 
- * Callers must therefore be ready to catch rejections. 
+ *
+ * Callers must therefore be ready to catch rejections.
+ *
+ * See the comments for the send() function itself for more
+ * details.
  */
 
 
@@ -96,17 +99,7 @@
     reconnectBaseMs: 250,   // 500, 1000, 2000, 4000, 8000, 16000,
     reconnectMaxMs:  32000, // after 8 attempts or 63.75 seconds
     // Delay after which to give up trying to send a message
-    stopTryingMs:    120000,  
-
-    // Console
-    c: {
-      addToList:  () => {},
-      log:        () => {},
-      logAck:     () => {},
-      logCall:    () => {},
-      showStatus: () => {},
-      statistics: () => {},
-    }
+    stopTryingMs:    120000,
   }
 
 
@@ -138,12 +131,13 @@
     const listeners  = {
       open:      new Set(),
       close:     new Set(),
-      error:     new Set(),
       incoming:  new Set(), // emits for incoming non-PING
       pending:   new Set(), // emits "sent" and "acknowledged"
-      state:     new Set(),
-      reconnect: new Set(), // when _openSocket is called
-      retrying:  new Set(), // each time _scheduleReconnect called
+      state:     new Set(), // IDLE / WAITING / RECONNECTING
+      // Debugging
+      error:     new Set(),
+      warn:      new Set(),
+      info:      new Set(),
     }
 
 
@@ -213,9 +207,9 @@
 
     function cpr() {
       // If there is an active socket, sends a manual PING, which
-      // will call _scheduleReconnect() immediately if it fails to
-      // be acknowledged. If there is no active socket, requests
-      // a reconnection.
+      // will call _scheduleReconnect() after ackTimeoutMs if it
+      // fails to be acknowledged. If there is no active socket,
+      // ensures that reconnection will occur.
       if (socket) {
         _schedulePulse(socket)
 
@@ -231,17 +225,35 @@
     }
 
 
+    /**
+     * Called by the user, perhaps at a moment when the socket is
+     * already down or reconnecting. This will close down an OPEN
+     * socket and prevent
+     */
     function disconnect() {
       closedByUser = true
-      _teardown("user disconnect", 1000)
+      const reason = "user disconnect"
+      const code = 1000
+      _teardown(code, reason) // returns if !socket
+      // Clears any current reconnectTmr that might have just been
+      // set by _scheduleReconnect
       _cancelReconnect()
       _setState("IDLE")
-      _emit("close") // missing status
+
+      // If socket is already null, no _gen field is available for
+      // it. Emit a "close" event anyway to confirm that the socket
+      // is guaranteed to be closed.
+      _emit("close", {
+        ...(socket && { generation: socket._gen }),
+        code,
+        reason,
+        wasClean: true // user's orders
+      })
     }
 
 
     function _openSocket(reason) {
-      _teardown(reason, 1000)
+      _teardown(1000, reason)
 
       const myGen = ++generation
       const ws    = new WebSocket(opts.url + opts.path)
@@ -263,13 +275,15 @@
 
       // Adopt this ws as the currently active socket
       socket = ws
-      _emit("reconnect", { generation: myGen, reason })
-
-      opts.c.showStatus(isConnected())
+      _emit("info", {
+        action: "_openSocket",
+        generation: myGen,
+        reason
+      })
     }
 
 
-    function _teardown(reason, code = 1000, text = reason) {
+    function _teardown(code = 1000, reason) {
       if (!socket) { return }
 
       const ws = socket
@@ -281,12 +295,9 @@
                   || ws.readyState === WebSocket.CONNECTING
       if (active) {
         try {
-          ws.close(code, text)
+          ws.close(code, reason)
         } catch { /* already closing */ }
-      }
-
-      opts.c.showStatus(isConnected()) // false: socket = null
-    }
+      }    }
 
 
     function _clearTimers(ws) {
@@ -315,24 +326,30 @@
 
       _setState(restate)
       _schedulePulse(ws)
-      _emit("open", { generation: ws._gen })
-
-      opts.c.showStatus(isConnected())
-    }
+      _emit("open", { generation: ws._gen })    }
 
 
     function _onError(ws) {
-      if (ws !== socket) return
-      _emit("error", { generation: ws._gen })
+      if (ws !== socket) {
+        // ws has been politely trying to tell the server that it
+        // is closing because it's dead, but because it's dead, the
+        // communication has failed, and the attempt has timed out
+        // It's possible that ws was two generations ago.
+        // return
+      }
+
+      _emit("error", { generation: ws._gen, current: socket?._gen })
     }
 
 
     function _onClose (ws, event) {
       if (ws !== socket) {
-        return opts.c.showStatus(isConnected()) // false
+        // See notes for _onError() above
+        return
       }
 
       _clearTimers(ws)
+      // Make it impossible to send outgoing messages
       socket = null
       socketId = ""
 
@@ -343,9 +360,6 @@
         wasClean: event.wasClean,
       }
       _emit("close", status)
-
-      opts.c.showStatus(isConnected())
-
       if (closedByUser) {
         _setState("IDLE")
         return
@@ -363,9 +377,42 @@
      * 0. Messages with sender_id "SYSTEM", such as "CONNECTION",
      *    which is sent when a socket opens on the server, and
      *    "LOGGED_IN", which is sent in response to a "LOG_IN"
-     *    request. Such messages will trigger:
+     *    request.
+     *    The "CONNECTION" message was not explicitly requested by
+     *    a send() action, so it will trigger:
      *
      *    _emit("incoming", message)
+     *
+     *    "LOGGED_IN" may have been sent manually by the user, or
+     *    automatically by an _identifyUser() call triggered by the
+     *    incoming "CONNECTION". As this was sent via send(), it
+     *    will generate "pending" messages, which should
+     *    (eventually) include:
+     *    + "queued"
+     *    + "sent"
+     *    + "acknowledged" (if ACK fails to arrive resend triggers)
+     *    + "handled"
+     *
+     *    When LOG_IN is handled by an incoming LOGGED_IN message,
+     *    this will trigger:
+     *
+     *    _emit("pending", {
+     *      corr: message.corr,
+     *      message: {
+     *        subject: "LOGGED_IN" | "LOGIN_FAILED",
+     *        user_name,
+     *        user_id,
+     *        ...
+     *      },
+     *      status: "handled"
+     *    })
+     *
+     *    The user_id and user_name will be available inside the
+     *    message. If the call for LOG_IN came from the user
+     *    (rather than from a reconnection), the caller's promise
+     *    will resolve with the outgoing message. Only the
+     *    "pending" message will indicate the success or failure
+     *    of the LOG_IN attempt.
      *
      * 1. ACK messages to acknowledge that the server received
      *    an outgoing message.
@@ -394,12 +441,16 @@
      *    client. Such a message will trigger:
      *
      *    _emit("incoming", message)
+     *
+     *    This includes the initial "CONNECTION" message send by
+     *    the server when the server socket is first created.
      */
     function _onMessage(ws, { data }) {
       if (ws !== socket) { return }
 
       let message
       try { message = JSON.parse(data) } catch { return }
+      let treated = false
 
       // Any inbound message proves the socket is alive
       ws._ackMiss = 0
@@ -413,8 +464,7 @@
 
       } else if (message.sender_id === "SYSTEM") {
         // CONNECTION, LOGGED_IN, ...?
-        return _treatSystemMessage(message)
-        // calls _emit("incoming", message)
+        treated = _treatSystemMessage(message)
       }
 
       // Check if the incoming message is the response to an
@@ -424,9 +474,13 @@
       if (receipt) {
         _treatResponse(ws, message, receipt)
 
-      } else {
+      } else if (!treated) { // ...by _treatSystemMessage()
         // Neither ACK nor response nor unshared SYSTEM; possibly
-        // a message from a third party.
+        // a message from a third party. If message.corr exists,
+        // this will belong to the third party. If this is an
+        // incoming Chat message, message.corr can be added to the
+        // outgoing message as message.sender_corr, when confirming
+        // that this user has opened the message.
         _emit("incoming", message)
       }
     }
@@ -434,6 +488,53 @@
 
     // HOUSEKEEPING // HOUSEKEEPING // HOUSEKEEPING //
 
+    function _treatSystemMessage(message) {
+      switch (message.subject) {
+        case "CONNECTION":
+          socketId = message.recipient_id // private and temporary
+
+          // The socket is now ready to send outgoing messages,
+          // such as a LOG_IN reminder to the server of this
+          // user's identity.
+          _identifyUser()
+
+          // This message wasn't explicitly requested by a send()
+          // action, so it has never been pending.
+          _emit("incoming", message)
+        break // status available through isConnected()
+
+        case "LOGGED_IN":
+          // Store user_id and user_name locally. These can be
+          // accessed through gameSocket.getUser()
+          ({ user_id, user_name } = message)
+
+          // Now that the server can identify the user to whom this
+          // socket belongs, it's safe to send any previously
+          // unacknowledged messages
+          _sendMessagesInQueue()
+
+          _emit("pending", {
+            corr: message.corr,
+            message,
+            status: "handled"
+          })
+      }
+
+      return true // tell _onMessage() this was already treated
+    }
+
+
+    /**
+     * Called by _treatSystemMessage() when "CONNECTION" is
+     * received. If the previous connection in this session was
+     * broken, the server needs to be told which user the new
+     * socket belongs to, so that it can apply any instructions
+     * from this user appropriately.
+     * The server will respond to this request with a LOGGED_IN
+     * message, at which point any queued messages that did not
+     * receive acknowledgement before the socket broke will be
+     * resent.
+     */
     function _identifyUser() {
       if (user_name || user_id) {
         send({
@@ -442,29 +543,6 @@
           user_id,
           user_name
         })
-      }
-    }
-
-
-    function _treatSystemMessage(message) {
-      switch (message.subject) {
-        case "CONNECTION":
-          socketId = message.recipient_id // private and temporary
-          _emit("incoming", message)
-          // The socket is now ready to send outgoing messages
-          _sendMessagesInQueue()
-        break // status available through isConnected()
-
-        case "LOGGED_IN":
-          // Store user_id and user_name locally. These can be
-          // accessed through gameSocket.getUser()
-          ({ user_id, user_name } = message)
-          opts.c.log("LOGGED_IN", message.corr.slice(0, 8))
-          _emit("incoming", {
-            subject: message.subject,
-            user_id,
-            user_name
-          })
       }
     }
 
@@ -528,7 +606,12 @@
     // KEEPALIVE / IDLE (slow) / WAITING (fast)
 
     /**
-     * Sent by _onOpen cpr _setState _onMessage _scheduleReconnect
+     * Sent by:
+     *  + cpr
+     *  + _onOpen
+     *  + _setState
+     *  + _onMessage
+     *  + _scheduleReconnect
      * @param {socket} ws
      * @returns
      */
@@ -577,9 +660,7 @@
      * be called again, but reconnectMs will have increased, to
      * give the server progressively more time to react.
      */
-    function _scheduleReconnect () {
-      opts.c.log("_scheduleReconnect()")
-      _cancelReconnect()
+    function _scheduleReconnect () {      _cancelReconnect()
 
       reconnectTmr = setTimeout(() => {
         reconnectTmr = null
@@ -589,7 +670,7 @@
       // Wait longer before next reconnect attempt
       reconnectMs = Math.min(opts.reconnectMaxMs, reconnectMs * 2)
 
-      _emit("retrying", { reconnectMs} )
+      _emit("info", { action: "_scheduleReconnect", reconnectMs })
     }
 
 
@@ -605,11 +686,9 @@
      *
      * @param {object} payload must be an object
      * @param {mixed} rsvp may be an integer, which should be
-     *        bigger than ackTimeoutMs. 
+     *        bigger than ackTimeoutMs.
      */
-    function send(payload, rsvp) {
-      // opts.c.log("send", payload)
-      if (typeof payload !== "object") {
+    function send(payload, rsvp) {      if (typeof payload !== "object") {
         throw new Error("Object required as payload for send")
       }
       rsvp = parseInt(rsvp) || 0
@@ -666,9 +745,9 @@
       message.sender_id = socketId // won't change after first time
       message.time = Date.now() // for latency
 
-      if (!message.abandonAfter) {
-        // Prepare to reject the sending of the message if 
-        message.abandonAfter = Date.now() + opts.stopTryingMs
+      if (!envelope.abandonAfter) {
+        // Prepare to reject the sending of the message if
+        envelope.abandonAfter = Date.now() + opts.stopTryingMs
       }
 
       // Create a timeout for the ACK message. A simple PING will
@@ -731,24 +810,28 @@
     /**
      * Triggered by the envelope.timer after ackTimeoutMs, if no
      * ACK message was received by then from the server
-     * @param {socket} ws 
+     * @param {socket} ws
      * @param {string} corr is the unique transaction id
      */
     function _retrySend(ws, corr) {
-      if (state === "RECONNECTING") {
+      if (ws !== socket || state === "RECONNECTING") {
         // _sendMessagesInQueue will resend when a socket reopens
         return
       }
 
-      opts.c.log("retrySend", corr.slice(0, 8))
       // The timer stored for this corr in ws._rsvp has triggered.
       // Delete the memory of it. A new rsvp will be created if
-      // the message gets resent
+      // the message gets resent.
       ws._rsvp.delete(corr)
 
       // Give up trying to send this message if too much time has
       // passed
       const envelope = queue.get(corr)
+      if (!envelope) {
+        console.log("*****:", corr, "*****")
+        return
+      }
+
       if (Date.now() > envelope.abandonAfter) {
         return _abandonSend(ws, corr)
       }
@@ -765,7 +848,8 @@
         // reconnection, which will resend the entire contents of
         // the queue when the connection is re-established
         envelope.retried = false // so next socket will resend
-        return _setState("RECONNECTING")
+
+        _abandonSocket(ws, 1000, "reconnecting")
       }
     }
 
@@ -779,9 +863,9 @@
       ws?._pending.delete(corr)
       queue.delete(corr)
 
-      const { timer, message, resolve } = envelope
+      const { timer, message, reject } = envelope
       clearTimeout(timer)
-      resolve({ reason: "abandoned", message: message })
+      reject({ reason: "abandoned", message: message })
       _emit("pending", { corr, message, status: "abandoned" })
     }
 
@@ -789,8 +873,8 @@
     /**
      * Called by _onMessage() for messages that requested an rsvp
      * from the server
-     * @param {*} ws 
-     * @param {*} message 
+     * @param {*} ws
+     * @param {*} message
      * @param {object} receipt will be { timer }
      */
     function _treatResponse(ws, message, receipt) {
@@ -803,7 +887,10 @@
       // outgoing message has been acted on.
       const envelope = ws._pending.get(corr)
       ws._pending.delete(corr)
-      envelope.resolve({ reason: "rsvp received" })
+      envelope.resolve({
+        status: "rsvp received",
+        message: envelope.message
+      })
 
       // The calling script can use corr to associate this response
       // with the outgoing message whose progress it was informed
@@ -823,7 +910,12 @@
      *                 an rsvp
      */
     function _treatMissedReceipt(ws, corr) {
-      const { message, reject } = ws._rsvp.get(corr)
+      const rsvp = ws?._rsvp.get(corr)
+      if (!rsvp) {
+        return
+      }
+
+      const { message, reject } = rsvp
       ws._rsvp.delete(corr) // so a very late message is ignored
       reject({ reason: "receipt overdue" })
 
@@ -836,29 +928,29 @@
      * ws._pending.get(corr) after ackTimeoutMs
      * @param {socket} ws is the socket the message was sent by
      * @param {string} corr identifies the outgoing ACK message
-  
-     * @returns 
+
+     * @returns
      */
     function _treatMissedACK(ws, corr) {
-      opts.c.log("TREAT MISSED ACK", corr.slice(0, 8))
+      _emit("warn", `TREAT MISSED ACK: ${corr.slice(0, 8)}`)
 
-      // Nothing is awaitng the Promise created by send() for
+      // Nothing is awaiting the Promise created by send() for
       // this ACK message, so simply resolve it silently
       const { resolve, message } = ws._pending.get(corr)
       ws._pending.delete(corr) // so a very late message is ignored
-      resolve({ reason: "missed ACK", message })
+      resolve({ status: "missed ACK", message })
 
       if (ws !== socket) { // A new socket is already active
         return
       }
 
+      ws._ackMiss++
+
       if (ws._ackMiss >= opts.pulseMaxMisses) {
-        ws.close(1000, "reconnecting")
+        return _abandonSocket(ws, 1000, "reconnecting")
       }
 
       _schedulePulse(ws)
-
-      ws._ackMiss++
     }
 
 
@@ -868,15 +960,19 @@
 
       // If message had been queued, remove it from the queue
       // now that it has been delivered...
-      const { corr, time } = message // subjectalways "ACK"
+      const { corr, time } = message // subject always "ACK"
       queue.delete(corr)
+
       // ... and is no longer pending acknowledgement
       clearTimeout(envelope.timer)
 
       if (!ws._rsvp.get(corr)) {
         // ACK resolves the Promise created by send() and no rsvp
         // is expected
-        envelope.resolve({ reason: "acknowledged", message })
+        envelope.resolve({
+          status: "acknowledged",
+          message: envelope.message
+        })
         ws._pending.delete(corr)
       } // else rsvp will resolve with "handled" or "unknown"
 
@@ -907,20 +1003,24 @@
         latencies.shift()
       }
 
-      opts.c.log("ACK", { ms, corr: corr.slice(0, 8)})
+      _emit("info", `ACK ${ms}, corr: ${corr.slice(0, 8)}`)
     }
 
 
     /**
-     * Called by _onOpen. Iterates through the messages in queue
-     * to resend them
+     * Called by _treatSystemMessage() after it treats an incoming
+     * LOGGED_IN message, confirming that the server knows which
+     * user this new socket belongs to.
+     * Iterates through the messages in queue to resend them.
      */
     function _sendMessagesInQueue() {
-      const corrs = []
-      queue.forEach( a => corrs.push(a) )
-      opts.c.log("opts.c _sendMessagesInQueue", corrs)
-
-      _identifyUser()
+      // Debugging >>>>>>>
+      const queued = []
+      queue.forEach( a => (
+        queued.push([a.corr.slice(0,8), a.message.subject])
+      ))
+      _emit("info", `_sendMessagesInQueue: [${queued}]`)
+      // <<<<<<<
 
       const now = Date.now()
 
@@ -933,6 +1033,50 @@
         _sendQueuedMessage(socket, envelope)
       }
     }
+
+
+    function _abandonSocket(ws, code=1000, reason="abandoned") {
+      if (ws !== socket || state === "RECONNECTING") {
+        return // already torn down, or stale
+      }
+
+      // Detach the socket from the client's state immediately to
+      // prevent any attempt to send outgoing messages on a dead
+      // socket. Any incoming messages that _do_ arrive will still
+      // be handled by the socket that sent them (but this is
+      // unlikely since that socket has just been reported dead).
+      socket = null
+      socketId = ""
+      _clearTimers(ws)
+      // New timeouts will be created by _sendQueuedMessage() after
+      // _sendMessagesInQueue()
+
+      // Tell the dead socket politely to close. This will cause
+      // it to attempt to communicate its intention to close with
+      // the server. Such attempts are almost bound to fail and
+      // will result in an error after the socket has given the
+      // server time to respond, but it didn't. `onerror` will be
+      // called at that point, but it will be old news and can be
+      // ignored.
+      try {
+        if ( ws.readyState === WebSocket.OPEN
+          || ws.readyState === WebSocket.CONNECTING
+        ) {
+          ws.close(code, reason)
+        }
+      } catch { /* already closing */ }
+
+      // Emit the close event ourselves, so listeners see a close
+      // immediately rather than waiting for the browser.
+      _emit("close", {
+        generation: ws._gen,
+        code,
+        reason,
+        wasClean: false,
+        synthetic: true, // distinguishes from a real browser close
+      })
+
+      _setState("RECONNECTING")    }
   }
 
 

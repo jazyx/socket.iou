@@ -132,4 +132,46 @@
     li:nth-child(odd) {
       background-color: transparent
     }
+
+    li.red {
+      --color: #c66;
+      color: var(--color);
+
+      &::first-line {
+        color: var(--color);
+      }
+
+      &::before,
+      &::marker {
+        color: var(--color);
+      }
+    }
+
+    li.orange {
+      --color: #c96;
+      color: var(--color);
+
+      &::first-line {
+        color: var(--color);
+      }
+
+      &::before,
+      &::marker {
+        color: var(--color);
+      }
+    }
+
+    li.green {
+      --color: #6c6;
+      color: var(--color);
+
+      &::first-line {
+        color: var(--color);
+      }
+
+      &::before,
+      &::marker {
+        color: var(--color)!important;
+      }
+    }
   }
