@@ -3,8 +3,8 @@
  *
  * A WebSocket client designed for turn-based games. While waiting
  * for a turn, a player may not be sending any messages to the
- * server, but will be expecting the WebSocket connection to be
- * alive so that the server can forward messages from other
+ * backend, but will be expecting the WebSocket connection to be
+ * alive so that the backend can forward messages from other
  * players.
  *
  * DESCRIPTION
@@ -17,12 +17,12 @@
  * as possible after an outgoing message fails, and then resend the
  * message.
  *
- * If the server detects a dropped connection, it cannot reconnect,
- * but it can send a message to other connected users, to warn them
- * of the situation.
+ * If the backend detects a dropped connection, it cannot
+ * reconnect, but it can send a message to other connected users,
+ * to warn them of the situation.
  *
  * Restoring connectivity means checking regularly if messages to
- * the server are being acknowledged. The frequency of these
+ * the backend are being acknowledged. The frequency of these
  * messages depends on the user's current state:
  *
  * + IDLE (not actively involved in the game)
@@ -38,7 +38,7 @@
  *    will reconnect and resend any messages that do not receive
  *    an ACK response within a reasonable time.
  *  + A user-initiated message that failed to receive an ACK will
- *    be resent with the same corr(elation id), so that the server
+ *    be resent with the same corr(elation id), so that the backend
  *    can ignore it if it was already treated (idempotency).
  *
  * The heartbeat delay will be calculated dynamically based on the
@@ -46,7 +46,7 @@
  * state (IDLE or WAITING).
  *
  * ////////////////////////////////////////////////////////////// *
- * A separate WebSocket server script handles these features:
+ * A separate WebSocket backend script handles these features:
  *
  *  + Detecting when a client connection breaks, and warning other
  *    connected users
@@ -62,24 +62,39 @@
  * or without an rsvp integer timeout delay.
  *
  * Each outgoing message is identified by a unique corr(elation
- * id). Any response from the server will include the same corr.
+ * id). Any response from the backend will include the same corr.
  *
+ * Promises and rejection
+ * ----------------------
  * The caller will receive a Promise. This will resolve if:
- *   + The message is acknowledged by the server, and no rsvp
- *     timeout delay was given
- *   + The message was handled by the server, which sent a custom
- *     response, using the same corr.
+ *  + The message is acknowledged by the backend, and no rsvp
+ *    timeout delay was given
+ *  + The message was handled by the backend, which sent a custom
+ *    response, using the same corr.
  *
  * The Promise will reject if the message could not be sent, did
- * not receive any acknowledgement from the server, or did not
+ * not receive any acknowledgement from the backend, or did not
  * receive a requested rsvp message after a delay of
- * opts.stopTryingMs (default: 2 minutes).
+ * opts.abandonAfterMs (default: 2 minutes).
  *
  * Callers must therefore be ready to catch rejections.
+ *
+ * Idempotent requests
+ * -------------------
+ * If an outgoing request does not receive an acknowledgement from
+ * the backend within a certain delay, the request will be resent.
+ * This can lead to the backend receiving the same instruction
+ * multiple times
+ *
+ * CAVEAT: All requests must be idempotent, to ensure that the
+ * backend executes exactly the same actions each time and responds
+ * with exactly the same message.
+ *
  *
  * See the comments for the send() function itself for more
  * details.
  */
+
 
 
 ;(function (root){
@@ -91,15 +106,15 @@
     keepaliveMs:     30000, // when little traffic is expected
     pulseFloorMs:    1000,  // every second when expecting incoming
     pulseCeilMs:     15000, // allows 5000ms RTT on slow connection
-    pulseRTTFactor:  3,
-    pulseMaxMisses:  2,
     latencyWindow:   20,    // max length of latencies array
     ackTimeoutMs:    1000,  // adjusted depending on latencies
+    pulseRTTFactor:  3,     // ACK expected after ackTimeoutMs x 3
+    pulseMaxMisses:  2,     // force reconnection if ACK missed x 2
     // Staggering reconnection attempts
     reconnectBaseMs: 250,   // 500, 1000, 2000, 4000, 8000, 16000,
-    reconnectMaxMs:  32000, // after 8 attempts or 63.75 seconds
+    reconnectMaxMs:  32000, // after 8 attempts or almost 32s
     // Delay after which to give up trying to send a message
-    stopTryingMs:    120000,
+    abandonAfterMs:  120000,
   }
 
 
@@ -113,8 +128,8 @@
     // INTERNAL STATE //
 
     let socket       = null
-    let generation   = 0
-    let socketId     = ""
+    let generation   = 0 // number of sockets created so far
+    let socket_id    = "" // will be set on "CONNECTION"
     let state        = "IDLE" // IDLE | WAITING | RECONNECTING
     let restate      = state // for after a reconnection
     let ackTimeoutMs = opts.ackTimeoutMs
@@ -122,20 +137,20 @@
     let reconnectTmr = null
     let closedByUser = false
 
-    // Unique values provided by server on login
+    // Unique values provided by backend on login
     let user_id      = "" // unique _id from User database
-    let user_name    = "" // human-readable name (not unique)
+    let user_name    = "" // human-readable name (not unique?)
 
     const queue      = new Map() // for messages to resend
-    const latencies  = []
+    const latencies  = [] // most recent Round Trip Times
     const listeners  = {
       open:      new Set(),
       close:     new Set(),
       incoming:  new Set(), // emits for incoming non-PING
       pending:   new Set(), // emits "sent" and "acknowledged"
       state:     new Set(), // IDLE / WAITING / RECONNECTING
-      // Debugging
-      error:     new Set(),
+      error:     new Set(), // emits on socket error
+      // Debugging: for logging specific non-socket activities
       warn:      new Set(),
       info:      new Set(),
     }
@@ -143,6 +158,7 @@
 
     // PUBLIC API //
     const api = {
+      // Connection
       cpr,
       connect,
       disconnect,
@@ -158,6 +174,7 @@
       // Listeners
       on,
       off,
+      listeners
     }
     return api
 
@@ -194,7 +211,7 @@
     function _emit(event, payload) {
       for (const fn of listeners[event]) {
         try {
-          fn(payload)
+          fn(payload, event)
 
         } catch (error) {
           console.error(error)
@@ -211,7 +228,7 @@
       // fails to be acknowledged. If there is no active socket,
       // ensures that reconnection will occur.
       if (socket) {
-        _schedulePulse(socket)
+        _reschedulePulse(socket)
 
       } else {
         _setState("RECONNECTING") // ignored if RECONNECTING now
@@ -228,14 +245,15 @@
     /**
      * Called by the user, perhaps at a moment when the socket is
      * already down or reconnecting. This will close down an OPEN
-     * socket and prevent
+     * socket and cancel any in-progress scheduled reconnection
      */
     function disconnect() {
       closedByUser = true
       const reason = "user disconnect"
       const code = 1000
-      _teardown(code, reason) // returns if !socket
-      // Clears any current reconnectTmr that might have just been
+      _teardown(code, reason) // returns immediately if !socket
+
+      // Clear any current reconnectTmr that might have just been
       // set by _scheduleReconnect
       _cancelReconnect()
       _setState("IDLE")
@@ -252,7 +270,13 @@
     }
 
 
+    /**
+     * Sent by connect() and a timeout set in _scheduleReconnect()
+     * @param {string} reason may be "connect()" or "reconnect
+     *                 timer"
+     */
     function _openSocket(reason) {
+      // Ensure that any previous socket is closed; socket = null
       _teardown(1000, reason)
 
       const myGen = ++generation
@@ -268,10 +292,10 @@
       ws._pending    = new Map() // for ACK messages
       ws._rsvp       = new Map() // for rsvp messages
 
-      ws.onopen      = (e) => _onOpen(ws, e)
-      ws.onerror     = (e) => _onError(ws, e)
-      ws.onclose     = (e) => _onClose(ws, e)
-      ws.onmessage   = (e) => _onMessage(ws, e)
+      ws.onopen      = (event) => _onOpen(ws, event)
+      ws.onerror     = (event) => _onError(ws, event)
+      ws.onclose     = (event) => _onClose(ws, event)
+      ws.onmessage   = (event) => _onMessage(ws, event)
 
       // Adopt this ws as the currently active socket
       socket = ws
@@ -283,6 +307,18 @@
     }
 
 
+    /**
+     * Called by _openSocket() and disconnect()
+     * @param {number} code is always 1000, because the close
+     *        action is always voluntary
+     * @param {string} reason will be "reconnect timer" if the call
+     *        came from _openSocket(), "user disconnect" if it came
+     *        from disconnect()
+     * @returns immediately if no socket is active
+     *
+     * Closes any existing socket and its timeout arrays; sets
+     * socket = null,
+     */
     function _teardown(code = 1000, reason) {
       if (!socket) { return }
 
@@ -297,61 +333,104 @@
         try {
           ws.close(code, reason)
         } catch { /* already closing */ }
-      }    }
+      }
+    }
 
 
+    /**
+     * @source Called by _teardown() and _onClose()
+     * @param {socket} ws will be the most recently active
+     *         WebSocket instance
+     * @action Ensures that none of the currently active timeout
+     *         instances will fire
+     */
     function _clearTimers(ws) {
+      // Cancel any currently scheduled PING
       clearTimeout(ws._pulseTimer)
       ws._pulseTimer = null
 
+      // Cancel any timeouts that would trigger if an ACK message
+      // is not received
       // ws.pending is { corr => { resolve, timer, reject }, ... }
       for (const { timer } of ws._pending.values()) {
         clearTimeout(timer)
       }
+      ws._pending.clear()
+
+      // Cancel any timeouts that would trigger if an expected
+      // response to an rsvp message is not received
       for (const { timer } of ws._rsvp.values()) {
         clearTimeout(timer)
       }
-
-      ws._pending.clear()
+      ws._rsvp.clear()
     }
 
 
     // SOCKET EVENTS //
 
+    /**
+     * Sent by a WebSocket instance when it learns that it has
+     * connected to the backend
+     * @param {socket} ws is the socket that just opened
+     * @returns immediately if ws has already been passed over as
+     *          the official socket instance
+     */
     function _onOpen (ws) {
       if (ws !== socket) { return }
 
-      socketId = ""
-      reconnectMs = opts.reconnectBaseMs
+      socket_id = "" // a new value will be sent on "CONNECTION"
+      reconnectMs = opts.reconnectBaseMs // delay until next time
 
+      // Adopt the state that the previous socket was using, by
+      // default. As soon as the backend receivse a LOG_IN message
+      // it will send the current game state, which may mean that
+      // the socket state will need to be updated.
       _setState(restate)
-      _schedulePulse(ws)
-      _emit("open", { generation: ws._gen })    }
+
+      // Start the heartbeat for the socket at the rate determined
+      // by state and the most recent RTT latencies.
+      _reschedulePulse(ws)
+
+      _emit("open", { generation: ws._gen })
+    }
 
 
     function _onError(ws) {
       if (ws !== socket) {
-        // ws has been politely trying to tell the server that it
+        // ws has been politely trying to tell the backend that it
         // is closing because it's dead, but because it's dead, the
         // communication has failed, and the attempt has timed out
         // It's possible that ws was two generations ago.
-        // return
+        return
       }
 
-      _emit("error", { generation: ws._gen, current: socket?._gen })
+      _emit("error", {
+        generation: ws._gen,
+        current: socket?._gen
+      })
     }
 
 
+    /**
+     * Called by a web socket when it has done its best to inform
+     * the backend that it is closing. If the connection is broken,
+     * this may be several seconds after socket.close() was called.
+     * @param {socket} ws
+     * @param {close event} event
+     * @returns
+     */
     function _onClose (ws, event) {
       if (ws !== socket) {
         // See notes for _onError() above
         return
       }
 
+      // Prevent any current timeouts from firing
       _clearTimers(ws)
+
       // Make it impossible to send outgoing messages
       socket = null
-      socketId = ""
+      socket_id = ""
 
       const status = {
         generation: ws._gen,
@@ -359,94 +438,167 @@
         reason: event.reason,
         wasClean: event.wasClean,
       }
+
+      _emit("info", `_onClose() triggered for socket ${ws.gen}
+state: ${state}, closedByUser: ${closedByUser},
+current socket: ${socket?._gen}
+IS IT GOOD TO _setState("RECONNECTING")?`)
+
       _emit("close", status)
       if (closedByUser) {
         _setState("IDLE")
         return
       }
+
       _setState("RECONNECTING")
     }
 
 
     /**
+     * Called when the socket receives an incoming message from
+     * the backend.
      * @param {socket} ws
      * @param {string} message should be a JSON string with a
-     *                 { ..., data, ... } field.
+     *                 { ..., data, ... } field. The data value
+     *                 is expected to have a format like:
+     *                 {
+     *                   "sender_id": "SYSTEM" | <uuid string>,
+     *                   "recipient_id": <this socket_id>,
+     *                   "subject": "ACK" | <custom subject>,
+     *                   // Relevant if response to client request
+     *                   "corr": <thread uuid>,
+     *                   "time": <ms used to calculate RTT>,
+     *                   // More?
+     *                   [other fields]
+     *                 }
      *
-     * There are four types of incoming messages:
-     * 0. Messages with sender_id "SYSTEM", such as "CONNECTION",
-     *    which is sent when a socket opens on the server, and
-     *    "LOGGED_IN", which is sent in response to a "LOG_IN"
-     *    request.
-     *    The "CONNECTION" message was not explicitly requested by
-     *    a send() action, so it will trigger:
+     * There are three types of incoming messages:
+     * 1. Unsolicited messages, such as the "CONNECTION" sent by
+     *    the backend when this socket connection comes online,
+     *    messages from third-party clients, or messages broadcast
+     *    to all clients in a specific group.
+     * 2. "ACK" messages, sent by the backend immediately after it
+     *    receives an outgoing message.
+     * 3. Custom messages generated by the backend in response to
+     *    an outgoing request.
+     * NOTE: An outgoing request may be associated with an rsvp
+     * timeout interval, or not).
      *
-     *    _emit("incoming", message)
+     * SYSTEM
+     * ------
+     * Messages with { sender_id: "SYSTEM", ... } are used to
+     * update the internal state of this GameSocket instance. They
+     * may also be listened for, so that the UI can be updated
+     * appropriately.
      *
-     *    "LOGGED_IN" may have been sent manually by the user, or
-     *    automatically by an _identifyUser() call triggered by the
-     *    incoming "CONNECTION". As this was sent via send(), it
-     *    will generate "pending" messages, which should
-     *    (eventually) include:
-     *    + "queued"
-     *    + "sent"
-     *    + "acknowledged" (if ACK fails to arrive resend triggers)
-     *    + "handled"
+     * ACK
+     * ---
+     * This instance's `ackTimeouMs` value is set to a multiple of
+     * the expected RTT for an immediate response from the backend.
+     * If no response is received after that number of ms, one of
+     * two things may have happened:
      *
-     *    When LOG_IN is handled by an incoming LOGGED_IN message,
-     *    this will trigger:
+     * 1. An "ACK" packet was sent but got lost
+     * 2. The socket connection is broken
+     * 3. The backend is down
      *
-     *    _emit("pending", {
-     *      corr: message.corr,
-     *      message: {
-     *        subject: "LOGGED_IN" | "LOGIN_FAILED",
-     *        user_name,
-     *        user_id,
-     *        ...
-     *      },
-     *      status: "handled"
-     *    })
+     * All outgoing messages are given a `corr` uuid and a `timer`
+     * datetime number. The backend is expected to respond with an
+     * "ACK" message with the same `corr` and `timer` values. If no
+     * "ACK" message is received within ackTimeouMs, this instance
+     * will test each of these hypotheses:
      *
-     *    The user_id and user_name will be available inside the
-     *    message. If the call for LOG_IN came from the user
-     *    (rather than from a reconnection), the caller's promise
-     *    will resolve with the outgoing message. Only the
-     *    "pending" message will indicate the success or failure
-     *    of the LOG_IN attempt.
+     *  + A first missing "ACK" message is considered a glitch, and
+     *    it is simply in the socket's `_ackMiss` property.
+     *  + A subsequent missing "ACK" message is considered a sign
+     *    that the socket connection is broken, so the current
+     *    socket is torn down and replaced with a new one.
+     *  + Staggered attempts will be made to create a new
+     *    connection and if these fail for longer than expected,
+     *    the UI will be warned that the backend may be down.
      *
-     * 1. ACK messages to acknowledge that the server received
-     *    an outgoing message.
-     *    For an outgoing "PING", this will be the only response.
-     *    For user-initiated outgoing messages, this will trigger…
+     * Any "ACK" message that is received will set the socket's
+     * `_ackMiss` property back to zero.
      *
-     *    _emit("pending", {corr, message, status: "acknowledged"})
+     * A missed "ACK" may prompt this instance to resend the
+     * original message with the same `corr` value and a new
+     * `timer`. This can lead to the backend receiving multiple
+     * identical requests.
      *
-     *    … where `message` is the original outgoing message.
+     *         **All requests must be idempotent.**
      *
-     * 2. A custom response to an outgoing message, for which an
-     *    rsvp timeout has been set. If the response is received
-     *    before the timeout triggers, this will trigger…
+     * RSVP
+     * ----
+     * You can call `send(payload, rsvp)` with an integer `rsvp`
+     * value. This will start a timeout with the given `rsvp`
+     * delay. If no custom response is received before the timeout
+     * triggers, the Promise created for the outgoing message will
+     * be rejected.
      *
-     *    _emit("pending", {corr, message, status: "handled"})
+     * A message with an `rsvp` will not automatically be resent
+     * if its associated "ACK" is missed. (The missing "ACK" may
+     * have been a glitch.) However, if multiple "ACK" messages are
+     * missed in succession, this instance will create a new socket
+     * and resend any messages that have not yet received a
+     * response ("ACK" only, or `rsvp`).
      *
-     *    … where `message` is the new incoming response.
+     * A message without an `rsvp` is not considered critical. If
+     * no "ACK" or custom response is received for it, its promise
+     * will resolve with a status (which may be "missed ACK"); it
+     * will not reject.
      *
-     *    If the timeout triggered, then there is no longer any
-     *    record that an rsvp was requested. Such a late response
-     *    will be treated like a third party message (3) below.
+     * ENVELOPE
+     * --------
+     * All outgoing messages (except for no-ack single shot
+     * messages) are associated with an envelope. The envelope
+     * contains:
      *
-     * 3. An unsolicited message from the server or a third party.
-     *    Such a message may include a `corr` value, but this will
-     *    not correspond to any `corr` values created by this
-     *    client. Such a message will trigger:
+     *  + The outgoing message
+     *  + Its unique `corr` value
+     *  + Its `time` (when first sent) value
+     *  + A `timer` timeout index, identifying the timeout which
+     *    will trigger if no "ACK" or `rsvp` response is received
+     *    after a given delay
+     *  + The resolve and reject callbacks for a promise. The
+     *    reject callback will only be triggered for `rsvp`
+     *    messages which fail to receive a timely custom response.
+     *    The resolve callback will be triggered in all other
+     *    cases:
+     *    * Receipt of custom `rsvp` response
+     *    * Receipt of "ACK" for non-rsvp messages
+     *    * Failure to receive "ACK" for non-rsvp messages
      *
-     *    _emit("incoming", message)
+     * RESEND LIMIT
+     * ---
+     * A message an `rsvp` will continue to be resent until its
+     * rsvp-defined timeout fires.
      *
-     *    This includes the initial "CONNECTION" message send by
-     *    the server when the server socket is first created.
+     * A message without an `rsvp` will continue to be resent
+     * until the timeout defined by `opts.abandonAfterMS` fires.
+     *
+     * NO-ACK SINGLE SHOT MESSAGES
+     * ---
+     * For certain messages, an "ACK" reply is overkill. For
+     * instance, a message to update the client's cursor position
+     * on a shared screen will be out of date almost immediately.
+     *
+     * For such messages, you can send an rsvp value of -1 (or
+     * any value less than zero). No timeout will ever fire, and a
+     * resolved Promise with { status: "shot", message } will be
+     * returned immediately.
+     *
+     * _onMessage() may still receive responses to such messages,
+     * but these will be handled as unsolicited third-party
+     * messages.
      */
     function _onMessage(ws, { data }) {
-      if (ws !== socket) { return }
+      if (ws !== socket) {
+        // ws is no longer trustworthy, and the incoming message
+        // may be stale, or may duplicate the response to a
+        // resent message. Let the new socket be the only source of
+        // truth.
+        return
+      }
 
       let message
       try { message = JSON.parse(data) } catch { return }
@@ -456,23 +608,25 @@
       ws._ackMiss = 0
 
       // Wait a while before sending a new pulse message
-      _schedulePulse(ws)
+      _reschedulePulse(ws)
 
-      // Handle ACK and private SYSTEM messages only internally
+      // Handle ACK messages separately (acknowledgement, latency)
       if (message.subject === "ACK" && message.corr) {
         return _settleAck(ws, message)
+      }
 
-      } else if (message.sender_id === "SYSTEM") {
-        // CONNECTION, LOGGED_IN, ...?
+      // Handle SYSTEM messages internally
+      if (message.sender_id === "SYSTEM") {
+        // subject = CONNECTION, LOG_IN, ...?
         treated = _treatSystemMessage(message)
       }
 
       // Check if the incoming message is the response to an
       // outgoing request from this client, with an rsvp
-      const receipt = ws._rsvp.get(message.corr)
+      const envelope = queue.get(message.corr)
 
-      if (receipt) {
-        _treatResponse(ws, message, receipt)
+      if (envelope && !treated) {
+        _treatResponse(ws, message, envelope)
 
       } else if (!treated) { // ...by _treatSystemMessage()
         // Neither ACK nor response nor unshared SYSTEM; possibly
@@ -490,34 +644,57 @@
 
     function _treatSystemMessage(message) {
       switch (message.subject) {
-        case "CONNECTION":
-          socketId = message.recipient_id // private and temporary
-
-          // The socket is now ready to send outgoing messages,
-          // such as a LOG_IN reminder to the server of this
-          // user's identity.
-          _identifyUser()
+        case "CONNECTION":{
+          socket_id = message.recipient_id // private and temporary
 
           // This message wasn't explicitly requested by a send()
-          // action, so it has never been pending.
+          // action, so there is no Promise pending.
           _emit("incoming", message)
-        break // status available through isConnected()
 
-        case "LOGGED_IN":
+          // The socket is now ready to send outgoing messages,
+          // such as a LOG_IN reminder to the backend of this
+          // user's identity.
+          _identifyUser()
+          break // status available through isConnected()
+        }
+
+        case "LOG_IN": {
+          const envelope = queue.get(message.corr)
+
+          // console.log(`LOG_IN ${message.corr} envelope: ${JSON.stringify(envelope)}`)
+          if (!envelope) {
+            // Not one of ours, or already treated
+            break
+          }
+          // Response received; no need to resend
+          clearTimeout(envelope.endTimer)
+          queue.delete(message.corr)
+
+          // console.log(`LOG_IN envelope${envelope}`)
+          
+
           // Store user_id and user_name locally. These can be
           // accessed through gameSocket.getUser()
-          ({ user_id, user_name } = message)
+          if (message.status === "LOGGED_IN") {
+            ({ user_id, user_name } = message)
 
-          // Now that the server can identify the user to whom this
-          // socket belongs, it's safe to send any previously
-          // unacknowledged messages
-          _sendMessagesInQueue()
+            // Now that the backend can identify the user to whom
+            // this socket belongs, it's safe to send any
+            // previously unacknowledged messages.
+            _sendMessagesInQueue()
+
+          } else {
+            // LOGIN_FAILED: perhaps the previously connected
+            // user has been expelled.
+            user_name = user_id = ""
+          }
 
           _emit("pending", {
             corr: message.corr,
-            message,
+            message, // contains status, user_name and user_id
             status: "handled"
           })
+        }
       }
 
       return true // tell _onMessage() this was already treated
@@ -527,10 +704,10 @@
     /**
      * Called by _treatSystemMessage() when "CONNECTION" is
      * received. If the previous connection in this session was
-     * broken, the server needs to be told which user the new
+     * broken, the backend needs to be told which user the new
      * socket belongs to, so that it can apply any instructions
      * from this user appropriately.
-     * The server will respond to this request with a LOGGED_IN
+     * The backend will respond to this request with a LOGGED_IN
      * message, at which point any queued messages that did not
      * receive acknowledgement before the socket broke will be
      * resent.
@@ -549,8 +726,11 @@
 
     // STATE MACHINE //
 
-    function isConnected () {
-      return !!socket && socket.readyState === WebSocket.OPEN
+    function isConnected (socket_id_required) {
+      return !!((!socket_id_required || socket_id)
+               && socket
+               && socket.readyState === WebSocket.OPEN
+               )
     }
 
 
@@ -591,7 +771,7 @@
 
         socket._pulseTimer = null
         socket._ackMiss  = 0
-        _schedulePulse(socket)
+        _reschedulePulse(socket)
       }
 
       if (next === "RECONNECTING") {
@@ -609,13 +789,15 @@
      * Sent by:
      *  + cpr
      *  + _onOpen
-     *  + _setState
      *  + _onMessage
-     *  + _scheduleReconnect
+     *  + _setState
+     *  + _treatMissedACK
      * @param {socket} ws
-     * @returns
+     * @returns immediately if ws is not the active socket
+     * Prevents any currently scheduled PING from being sent, and
+     * schedules one at the appropriate later time.
      */
-    function _schedulePulse(ws) {
+    function _reschedulePulse(ws) {
       if (ws !== socket) { return }
 
       clearTimeout(ws._pulseTimer)
@@ -623,18 +805,6 @@
       const pulse = () => send({ subject: "PING" })
       const delay = _pulseInterval()
       ws._pulseTimer = setTimeout(pulse, delay)
-    }
-
-
-    function _getAckTimeout() {
-      if (latencies.length < 3) {
-        return opts.ackTimeoutMs
-      }
-
-      const sorted = [...latencies].sort((a, b) => a - b)
-      const p95    = sorted[Math.floor(sorted.length * 0.95)]
-
-      return p95 * opts.pulseRTTFactor
     }
 
 
@@ -651,16 +821,42 @@
     }
 
 
+    function _getAckTimeout() {
+      if (latencies.length < 3) {
+        return opts.ackTimeoutMs
+      }
+
+      const sorted = [...latencies].sort((a, b) => a - b)
+      const p95    = sorted[Math.floor(sorted.length * 0.95)]
+
+      return p95 * opts.pulseRTTFactor
+    }
+
+
     // RECONNECT //
 
     /**
      * Sent when _setState("RECONNECTING") is called, which occurs
-     * in _onClose() and _schedulePulse after an ACK response is
-     * missed. If the _openSocket() attempt fails, _onClose() will
-     * be called again, but reconnectMs will have increased, to
-     * give the server progressively more time to react.
+     * in _onClose() and _reschedulePulse() after an ACK response
+     * is missed. If the _openSocket() attempt fails, _onClose()
+     * will be called again, but reconnectMs will have increased,
+     * to give the backend progressively more time to react.
      */
-    function _scheduleReconnect () {      _cancelReconnect()
+    function _scheduleReconnect () {
+      _cancelReconnect()
+
+      if (reconnectMs === opts.reconnectMaxMs) {
+        // The most recent connection attempt happened after a
+        // series of increasingly longer delays, now totalling the
+        // longest expected delay. It looks like the backend may be
+        // offline.
+        const delay = Math.floor(opts.reconnectMaxMs / 1000)
+        const message = `Unable to connect to backend after ${delay}s.`
+        _emit("warn", { issue: "connection", message })
+        // This warning will be repeated every reconnectMaxMs ms
+        // until a connection is established or the user
+        // disconnects.
+      }
 
       reconnectTmr = setTimeout(() => {
         reconnectTmr = null
@@ -674,6 +870,9 @@
     }
 
 
+    /**
+     * Called by _scheduleReconnect() and (manually) disconnect()
+     */
     function _cancelReconnect() {
       clearTimeout(reconnectTmr)
       reconnectTmr = null
@@ -683,110 +882,164 @@
     // SENDING //
 
     /**
-     *
+     * See the notes for _onMessage()
      * @param {object} payload must be an object
      * @param {mixed} rsvp may be an integer, which should be
-     *        bigger than ackTimeoutMs.
+     *         bigger than ackTimeoutMs. If it is < 0, then no
+     *         acknowledgment will be expected. If it is falsy,
+     *         no custom reply from the backend will be expected.
+     * @returns a Promise that will be resolved or rejected with an
+     *         object like {
+     *           message: payload
+     *           status: "shot"|"acknowledged"|"handled"|"unknown"
+     *         }
+     *         If rsvp < 0, the Promise will already be resolved
+     *         with status: "shot".
+     * If rsvp < 0: Attempts to send the payload immediately
+     * Otherwise: Places payload in an envelope and prepares to
+     *         send it (and resend it if necessary) when a socket
+     *         is available.
      */
-    function send(payload, rsvp) {      if (typeof payload !== "object") {
+    function send(payload, rsvp) {
+      if (typeof payload !== "object") {
         throw new Error("Object required as payload for send")
       }
-      rsvp = parseInt(rsvp) || 0
+      rsvp = parseInt(rsvp) || 0 // NaN is falsy
+
+      if (rsvp < 0) {
+        // Single shot. No acknowledgement or custom response is
+        // expected. Example: sending the client's mouse position.
+        socket?.send(JSON.stringify(payload))
+        return Promise.resolve({
+          message: payload,
+          status: "shot"
+        })
+      }
 
       return new Promise((resolve, reject) => {
         // Prepare message for sending, and queue it, regardless
         // of whether the socket is able to send it yet
         const corr  = crypto.randomUUID()
         const message = {
-          ...payload,
-          corr
+          corr,
+          ...payload
         }
+
+        // console.log("corr:", corr, payload.subject)
 
         const envelope = {
-          message,
           corr,
+          message,
           resolve,
           reject,
-          rsvp,
-          retries: 0
+          rsvp
         }
 
+        // PING messages are only sent once; they are not queued
         if (message.subject !== "PING") {
           // This is a user action message. Prepare to send it
           // multiple times.
           queue.set(corr, envelope)
           _emit("pending", { corr, message, status: "queued" })
+        } else {
+          // DEBUGGING ONLY
+          // _emit("info", { corr, subject: message.subject })
+
         }
 
-        if (!socketId
-         || !socket
-         || socket.readyState !== WebSocket.OPEN
-        ) {
+        if (!isConnected(true)) {
           if (message.subject === "PING") {
-            // Drop the PING; it should never be queued
+            // Drop the PING; it should never be queued. Nothing is
+            // awaiting the Promise, so resolve value is arbitrary.
             resolve("socket not ready")
           }
           return // wait for the next socket to open
         }
 
-        _sendQueuedMessage(socket, envelope)
+        _sendQueuedMessage(socket, envelope) // even PINGs, once
       })
     }
 
 
+    /**
+     * Called by send(), _retrySend(), _sendMessagesInQueue()
+     * @param {socket} ws should be the current socket
+     * @param {object} envelope should be an object with format {
+     *          message, // object
+     *          corr,    // unique id string
+     *          resolve, // Promise fulfiller
+     *          reject,  // Promise fulfiller
+     *          rsvp,    // positive intereger or undefined
+     *          retries  // integer
+     *        }
+     * @returns immediately if the message can't be sent
+     */
     function _sendQueuedMessage(ws, envelope) {
-      if (!socketId || ws.readyState !== WebSocket.OPEN) {
+      if (!socket_id || ws.readyState !== WebSocket.OPEN) {
         // This call will be made again when a connection is ready
         return
       }
 
-      const { message, corr, rsvp } = envelope
-      // Update message boilerplate
-      message.sender_id = socketId // won't change after first time
-      message.time = Date.now() // for latency
+      const { message, corr, rsvp } = envelope // in queue if !PING
+      // Ensure message has an official socket_id (first-time only)
+      message.sender_id = socket_id
 
-      if (!envelope.abandonAfter) {
-        // Prepare to reject the sending of the message if
-        envelope.abandonAfter = Date.now() + opts.stopTryingMs
-      }
+      if (!envelope.endTimer && message.subject !== "PING") {
+        // Prepare to reject this message if its deadline has
+        // passed. (Not relevant for PINGs)
+        const delay = rsvp ? rsvp : opts.abandonAfterMs
+        envelope.endTimer = setTimeout(() => (
+            _hitDeadline(ws, corr)
+          ), delay)
+        }
 
-      // Create a timeout for the ACK message. A simple PING will
-      // timeout differently from a user-initiated message.
-      const timedOut = () => {
-        message.subject === "PING"
-          ? _treatMissedACK(ws, corr)
-          : _retrySend(ws, corr)
-      }
-      envelope.timer = setTimeout(timedOut, ackTimeoutMs)
+      // Create a timeout for the ACK message (for every resend)
+      envelope.ackTimer = setTimeout(() => (
+        _treatMissedACK(ws, corr, message.subject)
+      ), ackTimeoutMs)
 
-      // Store details of the message to be sent in the ws instance
+      // Prepare to calculate RTT for this attempt, for latency
+      envelope.time = Date.now()
+
+      // envelope is already stored on queue, as:
+      // {
+      //   message,  // outgoing message
+      //   corr,     // its unique id
+      //   resolve,  // Promise resolve
+      //   reject,   // Promise reject
+      //   rsvp,     // falsy, or positive integer
+      //   ackTimer, // index for timeout to trigger _missedACK()
+      //   endTimer, // index for timeout to trigger _hitDeadline()
+      //   time      // local ms when ws.send() was about to occur
+      // }
+
+      // Store a pointer to envelope in the ws instance
       ws._pending.set(corr, envelope)
 
       ws.send(JSON.stringify(message))
       // One of two things will now happen:
       // 1. An incoming ACK message with corr will indicate that
-      //    the connection was still alive and the server received
+      //    the connection was still alive and the backend received
       //    the message
       // 2. The timeout will trigger, suggesting a connection
-      //    issue.
-      //    a) For ACK messages, this can happen up to
-      //       pulseMaxMisses times before a new socket connection
-      //       is scheduled. ACK messages will never be resent.
-      //    b) For user-initiated messages, a first missed ACK will
-      //       force the message to be resent with the same
-      //       socket. A second missed ACK will reschedule a new
-      //       connection, and the message will be resent with the
-      //       new socket.
-
-      // A user-initiated message may also expect a custom
+      //    issue. This can happen up to pulseMaxMisses times for
+      //    a given socket before a new socket connection is
+      //    scheduled.
+      //
+      // PING messages will never be resent.
+      // For user-initiated messages, a missed ACK will force the
+      // message to be resent with the same socket. If
+      // pulseMaxMisses has been reached for this socket, a new
+      // connection will be scheduled, and the message will be
+      // resent with the new socket.
+      //
+      // A user-initiated message may also expect a custom rsvp
       // response. This will be identified by the same corr, but
-      // may have any subject and payload. Generate a timeout for
-      // this custom response if rsvp > 0. Repurpose the existing
-      // resolve() callback for the response that shows that the
-      // server has handled the request.
-      if (rsvp) {
-        _requestReceipt(ws, envelope)
-      }
+      // may have any subject and payload.
+      //
+      // NOTE: The entire cycle, resend + ACK (+ rsvp) must occur
+      // within the lifetime of a single socket, before the
+      // endTimer fires.
 
       if (message.subject !== "PING") {
         // Indicate message has been sent, but not yet ACK'd
@@ -795,196 +1048,84 @@
     }
 
 
-    function _requestReceipt(ws, envelope) {
-      const { corr, rsvp } = envelope
-
-      // Add a receipt timeout to the sending socket
-      const timedOut = () => _treatMissedReceipt(ws, corr)
-      const timer = setTimeout(timedOut, rsvp)
-      const receipt = { corr, timer }
-
-      ws._rsvp.set(corr, receipt)
-    }
-
-
     /**
-     * Triggered by the envelope.timer after ackTimeoutMs, if no
-     * ACK message was received by then from the server
-     * @param {socket} ws
-     * @param {string} corr is the unique transaction id
+     * Sent by the backend immediately after receiving an outgoing
+     * message.
+     * @param {socket} ws is the socket that sent the message
+     * @param {object} message should have the structure: {
+     *          subject:      "ACK",
+     *          recipient_id: outgoing sender_id,
+     *          corr:         outgoing corr,
+     *          time:         ms when outgoing message was sent
+     *        }
+     * @returns immediately if missedACK timeout already fired
+     * It's possible that this or an earlier ACK message arrived
+     * late, so _treatMissedACK() was triggered.
      */
-    function _retrySend(ws, corr) {
-      if (ws !== socket || state === "RECONNECTING") {
-        // _sendMessagesInQueue will resend when a socket reopens
+    function _settleAck (ws, message) { // incoming message
+      const { corr } = message
+
+      // console.log("SETTLE:", corr, message.subject)
+
+      // Check if message is still pending or expecting an rsvp
+      // (PINGs will be in ws._pending but not in queue)
+      const envelope = ws._pending.get(corr)
+
+      // DEBUGGING
+      // _emit("info", { _settleAck: ">>>>>", envelope })
+
+      if (!envelope || !envelope.ackTimer) {
+        // The outgoing message fully handled earlier, or an
+        // earlier ACK message was treated for an rsvp message
         return
       }
 
-      // The timer stored for this corr in ws._rsvp has triggered.
-      // Delete the memory of it. A new rsvp will be created if
-      // the message gets resent.
-      ws._rsvp.delete(corr)
+      const {
+        rsvp,
+        ackTimer,
+        endTimer,
+        resolve,
+        time
+      } = envelope
 
-      // Give up trying to send this message if too much time has
-      // passed
-      const envelope = queue.get(corr)
-      if (!envelope) {
-        console.log("*****:", corr, "*****")
-        return
-      }
+      // No longer pending acknowledgement: clear the ACK timeout
+      // and update the envelope shared by ws._pending and queue
+      clearTimeout(ackTimer)
+      envelope.ackTimer = false
+      // console.log(`ackTimer ${ackTimer} cleared for ${corr} ${message.subject}`)
+      
 
-      if (Date.now() > envelope.abandonAfter) {
-        return _abandonSend(ws, corr)
-      }
+      _recordLatency(time, corr) // corr is just for debugging
 
-      if (!envelope.retried) {
-        // The first ACK message timed out. Try again immediately
-        // with the same socket, just in case this was a glitch.
-        clearTimeout(envelope.timer)
-        _sendQueuedMessage(ws, envelope)
-        envelope.retried = 1
+      // Update the pending status for all messages except PINGs
+      if (envelope.message.subject === "PING") {
+        return _cleanUpPing(ws, envelope)
 
       } else {
-        // The immediate second send also timed out. Schedule a
-        // reconnection, which will resend the entire contents of
-        // the queue when the connection is re-established
-        envelope.retried = false // so next socket will resend
-
-        _abandonSocket(ws, 1000, "reconnecting")
-      }
-    }
-
-
-    function _abandonSend(ws, corr) {
-      const envelope = queue.get(corr)
-      if (!envelope) { return }
-
-      // The _pending timer already triggered. The envelope will
-      // not be needed if the message is not sent again.
-      ws?._pending.delete(corr)
-      queue.delete(corr)
-
-      const { timer, message, reject } = envelope
-      clearTimeout(timer)
-      reject({ reason: "abandoned", message: message })
-      _emit("pending", { corr, message, status: "abandoned" })
-    }
-
-
-    /**
-     * Called by _onMessage() for messages that requested an rsvp
-     * from the server
-     * @param {*} ws
-     * @param {*} message
-     * @param {object} receipt will be { timer }
-     */
-    function _treatResponse(ws, message, receipt) {
-      // Don't let the receipt timeout trigger
-      const { corr, timer } = receipt
-      clearTimeout(timer)
-      ws._rsvp.delete(corr)
-
-      // Resolve the Promise created by send() now that the
-      // outgoing message has been acted on.
-      const envelope = ws._pending.get(corr)
-      ws._pending.delete(corr)
-      envelope.resolve({
-        status: "rsvp received",
-        message: envelope.message
-      })
-
-      // The calling script can use corr to associate this response
-      // with the outgoing message whose progress it was informed
-      // about in previous "pending" updates.
-      _emit("pending", { corr, message, status: "handled" })
-    }
-
-
-    /**
-     * An overdue receipt is not proof that the server did not act
-     * on the outgoing message. The server-side action may have
-     * succeeded but the response packet was delayed or lost. No
-     * new information is available about the state on the server.
-     *
-     * @param {socket} ws is the socket the message was sent by
-     * @param {string} corr identifies the message that requested
-     *                 an rsvp
-     */
-    function _treatMissedReceipt(ws, corr) {
-      const rsvp = ws?._rsvp.get(corr)
-      if (!rsvp) {
-        return
-      }
-
-      const { message, reject } = rsvp
-      ws._rsvp.delete(corr) // so a very late message is ignored
-      reject({ reason: "receipt overdue" })
-
-      _emit("pending", { corr, message, status: "unknown" })
-    }
-
-
-    /**
-     * Triggered by the envelope.timer stored in
-     * ws._pending.get(corr) after ackTimeoutMs
-     * @param {socket} ws is the socket the message was sent by
-     * @param {string} corr identifies the outgoing ACK message
-
-     * @returns
-     */
-    function _treatMissedACK(ws, corr) {
-      _emit("warn", `TREAT MISSED ACK: ${corr.slice(0, 8)}`)
-
-      // Nothing is awaiting the Promise created by send() for
-      // this ACK message, so simply resolve it silently
-      const { resolve, message } = ws._pending.get(corr)
-      ws._pending.delete(corr) // so a very late message is ignored
-      resolve({ status: "missed ACK", message })
-
-      if (ws !== socket) { // A new socket is already active
-        return
-      }
-
-      ws._ackMiss++
-
-      if (ws._ackMiss >= opts.pulseMaxMisses) {
-        return _abandonSocket(ws, 1000, "reconnecting")
-      }
-
-      _schedulePulse(ws)
-    }
-
-
-    function _settleAck (ws, message) { // incoming message
-      const envelope = ws._pending.get(message.corr)
-      if (!envelope) { return }
-
-      // If message had been queued, remove it from the queue
-      // now that it has been delivered...
-      const { corr, time } = message // subject always "ACK"
-      queue.delete(corr)
-
-      // ... and is no longer pending acknowledgement
-      clearTimeout(envelope.timer)
-
-      if (!ws._rsvp.get(corr)) {
-        // ACK resolves the Promise created by send() and no rsvp
-        // is expected
-        envelope.resolve({
-          status: "acknowledged",
-          message: envelope.message
-        })
-        ws._pending.delete(corr)
-      } // else rsvp will resolve with "handled" or "unknown"
-
-      if (envelope.message.subject !== "PING") {
         _emit("pending", {
           corr,
-          message: envelope.message,
+          message: message,
           status: "acknowledged"
         })
       }
 
-      _recordLatency(time, corr) // corr is just for debugging
+      // Check if there's an rsvp to wait for before resolving
+      // the promise created by send()
+      if (!rsvp) {
+        // Clean up now that the ACK-only message has been treated
+        clearTimeout(endTimer) // so it doesn't fire
+        ws._pending.delete(corr) // no longer waiting for anything
+        queue.delete(corr) // action complete: no need to resend
+
+        resolve({
+          status: "acknowledged",
+          message: message // original outgoing message
+        })
+
+      } // else {
+          // Don't resolve or remove from queue until rsvp has
+          // been dealt with one way or the other
+      //}
     }
 
 
@@ -1008,25 +1149,188 @@
 
 
     /**
-     * Called by _treatSystemMessage() after it treats an incoming
-     * LOGGED_IN message, confirming that the server knows which
-     * user this new socket belongs to.
+     * Triggered by the timeout identified by envelope.ackTimer
+     * when an incoming "ACK" message was not received for corr
+     * after ackTimeoutMs
+     * @param {socket} ws is the socket the message was sent by
+     * @param {string} corr identifies the outgoing message: PING
+     *        or user-initiated message
+     */
+    function _treatMissedACK(ws, corr, subject) {
+      // console.log("MISSED ACK corr:", corr, subject)
+      // Ensure that _settleACK will not run if the actual ACK
+      // response arrives after its deadline.
+      const envelope = ws._pending.get(corr)
+      const { message, time } = envelope
+                    // ^^^^ time only for debugging "warn" below
+      _emit("warn", `MISSED ACK: ${corr.slice(0, 8)} after ${Date.now() - time} ms`)
+
+      if (message.subject === "PING") {
+        // Tidy up for garbage collection
+        return _cleanUpPing(ws, envelope)
+      }
+
+      // The immediate ACK message did not arrive in time, but this
+      // could have been a glitch. It might arrive still arrive
+      // before its deadline.
+      // If this happens for a non-rsvp message, the outgoing
+      // eventually message succeeded. A late "acknowledged" status
+      // can be emitted, and the Promise can be resolved.
+      // If this happens for an rsvp message, there are still two
+      // chances for success during the lifetime of this current
+      // socket: a late ACK message and a timely rsvp.
+      // However, this missed ACK is a sign that the socket may
+      // already have broken. If it continues a sequence of other
+      // missed ACK messages, this socket will be abandoned, and
+      // the whole send + ack (+ rsvp) process will start again
+      // with a new socket.
+      // Action: Leave the envelope on both queue and ws._pending.
+
+      // Provide a progress update
+      _emit("pending", { corr, message, status: "overdue ACK" })
+
+      if (ws !== socket) {
+        // A new socket has already taken control. The envelope is
+        // still in queue and will be resent when a new socket is
+        // ready
+        return
+      }
+
+      // Resend the message (hoping for an ACK this time), or
+      // initiate reconnection depending on whether this one
+      // missed ACK was just a glitch.
+
+      if (++ws._ackMiss >= opts.pulseMaxMisses) {
+        _abandonSocket(ws, 1000, "reconnecting")
+        // ws._pending will be cleared, and all envelopes in queue
+        // will be resent when socket opens. If a delayed ACK
+        // message arrives now, _onMessage() will ignore it,
+        // because sender ws !== current socket
+
+      } else {
+        // Use the same socket to resend the message with a new
+        // ackTimer, to generate a new ACK message. Note that the
+        // earlier ACK message may still be on its way, so it's
+        // possible that multiple ACK messages will arrive for the
+        // same corr.
+        _sendQueuedMessage(ws, envelope) // use the same socket
+      }
+    }
+
+
+    function _cleanUpPing(ws, envelope) {
+      envelope.resolve("clean up PING") // nothing is awaiting this
+      ws._pending.delete(envelope.corr)
+
+      // DEBUGGING
+      // _emit("info", { cleanup: true, envelope })
+    }
+
+
+    /**
+     * Called by _onMessage() for messages that requested an rsvp
+     * from the backend
+     * @param {socket} ws is the socket the message was sent by
+     * @param {string} message will be the incoming response (not
+     *                 the original outgoing request message)
+     * @param {object} receipt will be { corr, timer }, where timer
+     *                 is the value for timeout that will trigger
+     *                 after rsvp ms, as provided to send(). It was
+     *                 read from ws._rsvp.
+     */
+    function _treatResponse(ws, message, envelope) {
+      if (!envelope) {
+        // A previous rsvp message for this corr has been treated
+        return
+      }
+
+      const {
+        message: outgoing,
+        corr,
+        resolve,
+        ackTimer,
+        endTimer
+      } = envelope
+
+      // Clean up now that rsvp has been received
+      clearTimeout(endTimer)
+      ws.queue(corr)
+      ws._pending.delete(corr)
+
+      _emit("info", `${message.subject} ("${corr.slice(0,8)}…") in _treatResponse()`)
+
+      // It's possible that the ACK message sent immediately by the
+      // has not arrived yet. Consider this receipt also as an
+      // acknowledgement
+      if (ackTimer){
+        clearTimeout(ackTimer)
+        _emit("pending", { corr, message, status: "acknowledged" })
+      }
+
+      // Now that the outgoing message has been acted on, resolve
+      // the Promise created by send()
+      resolve({
+        status: "rsvp received",
+        message: outgoing // original outgoing message in envelope
+      })
+
+      // The calling script can use corr to associate this response
+      // with the outgoing message whose progress it was informed
+      // about in previous "pending" updates.
+      _emit("pending", {
+        corr,
+        message, // current incoming message containing a response
+        status: "handled"
+      })
+    }
+
+
+    /**
+     * Triggered by the timeout identified by envelope.endTimer,
+     * whose duration will be rsvp (if there is one) or
+     * abandonAfterMs
+     * @param {socket} ws is the socket the message was sent by
+     * @param {string} corr identifies the outgoing user-
+     *         initiated message (not applicable to PINGs)
+     * @returns
+     */
+    function _hitDeadline(ws, corr) {
+      const envelope = queue.get(corr)
+      if (!envelope) { return }
+
+      const{ message, ackTimer, rsvp, resolve } = envelope
+      queue.delete(corr)
+      ws._pending.delete(corr)
+      clearTimeout(ackTimer)
+      // clearTimeout(endTimer) // already triggered
+
+      const status = rsvp ? "unknown" : "no ACK"
+
+      _emit("pending", { corr, message, status })
+      resolve("pending", { message, status })
+    }
+
+
+    /**
+     * Called by _treatSystemMessage() after it treats a
+     * successful incoming LOG_IN message, confirming that the
+     * backend knows which user this new socket belongs to.
      * Iterates through the messages in queue to resend them.
      */
     function _sendMessagesInQueue() {
       // Debugging >>>>>>>
       const queued = []
       queue.forEach( a => (
-        queued.push([a.corr.slice(0,8), a.message.subject])
+        queued.push(`"${a.message.subject}", "${a.corr.slice(0,8)}…"\n`)
       ))
-      _emit("info", `_sendMessagesInQueue: [${queued}]`)
+      _emit("info", `_sendMessagesInQueue: [\n ${queued}]`)
       // <<<<<<<
 
       const now = Date.now()
 
       for (const [corr, envelope] of [...queue]) {
         if (now > envelope.abandonAfter) {
-          _abandonSend(socket, corr)
+          _hitDeadlin(socket, corr)
           continue
         }
 
@@ -1046,16 +1350,16 @@
       // be handled by the socket that sent them (but this is
       // unlikely since that socket has just been reported dead).
       socket = null
-      socketId = ""
+      socket_id = ""
       _clearTimers(ws)
       // New timeouts will be created by _sendQueuedMessage() after
       // _sendMessagesInQueue()
 
       // Tell the dead socket politely to close. This will cause
       // it to attempt to communicate its intention to close with
-      // the server. Such attempts are almost bound to fail and
+      // the backend. Such attempts are almost bound to fail and
       // will result in an error after the socket has given the
-      // server time to respond, but it didn't. `onerror` will be
+      // backend time to respond, but it didn't. `onerror` will be
       // called at that point, but it will be old news and can be
       // ignored.
       try {
@@ -1067,7 +1371,9 @@
       } catch { /* already closing */ }
 
       // Emit the close event ourselves, so listeners see a close
-      // immediately rather than waiting for the browser.
+      // immediately rather than waiting for the browser to realize
+      // that the socket is dead and officially call ws.close().
+      // Such a "close" event on a dead socket will be ignored.
       _emit("close", {
         generation: ws._gen,
         code,
@@ -1076,7 +1382,8 @@
         synthetic: true, // distinguishes from a real browser close
       })
 
-      _setState("RECONNECTING")    }
+      _setState("RECONNECTING")
+    }
   }
 
 
