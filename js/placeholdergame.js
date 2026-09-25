@@ -25,8 +25,8 @@ gameSocket.connect()
   connect,
   disconnect,
   send,
-  startWaiting,
-  stopWaiting
+  beEager,
+  beIdle
 }, eventHandler){
 
   // Steal the handleEvent() function from Recorder, if possible
@@ -48,10 +48,10 @@ gameSocket.connect()
 
   const form       = document.getElementById("form")
   const username   = document.getElementById("username")
-  const messages   = document.getElementById("messages")
   const rsvp       = document.getElementById("rsvp")
+  const cprButton  = document.getElementById("cpr")
 
-  let waiting = false
+  let eager = false
   let counter = 0
 
   frontend.textContent = location.origin
@@ -62,6 +62,7 @@ gameSocket.connect()
   form.addEventListener("submit", logIn)
   toggleWait.addEventListener("click", toggleWaiting)
   rsvp.addEventListener("click", requestResponse)
+  cprButton.addEventListener("click", performCPR)
 
   // Listen for connection status
   on("open", showConnectionStatus)
@@ -110,30 +111,33 @@ gameSocket.connect()
 
 
   function toggleWaiting(param) {
-    waiting = !waiting
-    if (waiting) {
-      startWaiting()
-      toggleWait.textContent = "Is WAITING"
+    eager = !eager
+    if (eager) {
+      beEager()
+      toggleWait.textContent = "Is EAGER"
     } else {
-      stopWaiting()
+      beIdle()
       toggleWait.textContent = "Is IDLE"
     }
   }
 
 
   function requestResponse() {
-    const promise = send({
+    send({
       subject: "RSVP",
       text: `Message ${counter++}`,
     }, 2000)
-    // log("promise:", promise)
-    promise.then(response => {
-        log("resolved", response)
-      })
-      .catch(error => {
-        log("REJECTED", error)
-      }
-    )
+    .then(response => {
+      log("resolved", response)
+    })
+    .catch(error => {
+      log("REJECTED", error)
+    })
+  }
+
+
+  function performCPR() {
+    cpr()
   }
 
 

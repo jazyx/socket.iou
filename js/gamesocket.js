@@ -26,14 +26,13 @@
  * messages depends on the user's current state:
  *
  * + IDLE (not actively involved in the game)
- * + WAITING incoming messages
- * + ACTIVE (sending outgoing messages)
+ * + EAGER for incoming messages
  *
  * This WebSocket client will:
  *
  *  + Send a heartbeat message every 25-30 seconds in IDLE mode
  *    to ensure the connection remains open
- *  + Send a heartbeat every second or so in WAITING mode
+ *  + Send a heartbeat every second or so in EAGER mode
  *  + Request an ACK(nowledgement) of all outgoing messages, and
  *    will reconnect and resend any messages that do not receive
  *    an ACK response within a reasonable time.
@@ -43,7 +42,7 @@
  *
  * The heartbeat delay will be calculated dynamically based on the
  * longest response time over the past few cycles, and the current
- * state (IDLE or WAITING).
+ * state (IDLE or EAGER).
  *
  * ////////////////////////////////////////////////////////////// *
  * A separate WebSocket backend script handles these features:
@@ -130,7 +129,7 @@
     let socket       = null
     let generation   = 0 // number of sockets created so far
     let socket_id    = "" // will be set on "CONNECTION"
-    let state        = "IDLE" // IDLE | WAITING | RECONNECTING
+    let state        = "IDLE" // IDLE | EAGER | RECONNECTING
     let restate      = state // for after a reconnection
     let ackTimeoutMs = opts.ackTimeoutMs
     let reconnectMs  = opts.reconnectBaseMs // pause till reconnect
@@ -151,7 +150,7 @@
       close:     new Set(),
       incoming:  new Set(), // emits for incoming non-PING
       pending:   new Set(), // emits "sent" and "acknowledged"
-      state:     new Set(), // IDLE / WAITING / RECONNECTING
+      state:     new Set(), // IDLE / EAGER / RECONNECTING
       error:     new Set(), // emits on socket error
       // Debugging: for logging specific non-socket activities
       warn:      new Set(),
@@ -170,8 +169,8 @@
       // Messages
       send,
       // State
-      startWaiting,
-      stopWaiting,
+      beEager,
+      beIdle,
       getState: () => state,
       // Logged in user
       getUser: () => ({ user_name, user_id }),
@@ -753,7 +752,7 @@
     function _identifyUser() {
       if (user_name || user_id) {
         const rsvp = 2000
-        promise = send({
+        send({
           recipient_id: "SYSTEM",
           subject: "LOG_IN",
           user_id,
@@ -783,10 +782,10 @@
      * An external script requested a higher frequency of checks
      * so the client can be sure of receiving incoming messages
      */
-    function startWaiting() {
+    function beEager() {
       if (state === "RECONNECTING") { return }
 
-      _setState("WAITING")
+      _setState("EAGER")
     }
 
 
@@ -795,8 +794,8 @@
      * a high priority for now. Outgoing messages will serve to
      * check that the connection is still alive.
      */
-    function stopWaiting() {
-      if (state === "WAITING") {
+    function beIdle() {
+      if (state === "EAGER") {
         _setState("IDLE")
       }
     }
@@ -811,7 +810,7 @@
         restate = state
       }
 
-      if (socket && (next === "IDLE" || next === "WAITING")) {
+      if (socket && (next === "IDLE" || next === "EAGER")) {
         clearTimeout(socket._pulseTimer)
 
         socket._pulseTimer = null
@@ -828,7 +827,7 @@
     }
 
 
-    // KEEPALIVE / IDLE (slow) / WAITING (fast)
+    // KEEPALIVE / IDLE (slow) / EAGER (fast)
 
     /**
      * Sent by:
@@ -859,7 +858,7 @@
       if (state === "IDLE") {
         return opts.keepaliveMs // slow
       }
-      // When WAITING, check pulse much more frequently, depending
+      // When EAGER, check pulse much more frequently, depending
       // on the expected Round Trip Time
 
       ackTimeoutMs = _getAckTimeout()
