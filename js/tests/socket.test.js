@@ -1,5 +1,5 @@
 const { WS } = require("jest-websocket-mock")
-const { createGameSocket } = require("../gamesocket.js")
+const { createGameSocket } = require("../gameSocket.js")
 
 // jsdom doesn't provide crypto.randomUUID
 if (!globalThis.crypto) globalThis.crypto = {}

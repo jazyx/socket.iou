@@ -137,6 +137,9 @@
     let reconnectTmr = null
     let closedByUser = false
 
+    // Debug only
+    let pulses       = 0
+
     // Unique values provided by backend on login
     let user_id      = "" // unique _id from User database
     let user_name    = "" // human-readable name (not unique?)
@@ -160,6 +163,7 @@
     const api = {
       // Connection
       cpr,
+      setURL,
       connect,
       disconnect,
       isConnected,
@@ -174,6 +178,7 @@
       // Listeners
       on,
       off,
+      events: Object.keys(listeners)
     }
     return api
 
@@ -235,7 +240,22 @@
     }
 
 
-    function connect() {
+    function setURL(url) {
+      if (opts.url === url) {
+        return // no change; leave socket in its current state
+      }
+
+      // Change the socket's url for next connection
+      opts.url = url
+
+      if (isConnected()) {
+        // Close current socket and open a new one to the new url
+        _abandonSocket(socket, 1000, "resetting url")
+      } // else wait for a connect() command
+    }
+
+
+    function connect(url) {
       closedByUser = false
       _openSocket("connect()")
     }
@@ -295,6 +315,8 @@
       ws.onerror     = (event) => _onError(ws, event)
       ws.onclose     = (event) => _onClose(ws, event)
       ws.onmessage   = (event) => _onMessage(ws, event)
+
+      pulses = 0
 
       // Adopt this ws as the currently active socket
       socket = ws
@@ -390,7 +412,10 @@
       // by state and the most recent RTT latencies.
       _reschedulePulse(ws)
 
-      _emit("open", { generation: ws._gen })
+      _emit("open", {
+        generation: ws._gen,
+        url: ws.url
+      })
     }
 
 
@@ -405,7 +430,8 @@
 
       _emit("error", {
         generation: ws._gen,
-        current: socket?._gen
+        current: socket?._gen,
+        url: ws.url
       })
     }
 
@@ -437,11 +463,6 @@
         reason: event.reason,
         wasClean: event.wasClean,
       }
-
-      _emit("info", `_onClose() triggered for socket ${ws.gen}
-state: ${state}, closedByUser: ${closedByUser},
-current socket: ${socket?._gen}
-IS IT GOOD TO _setState("RECONNECTING")?`)
 
       _emit("close", status)
       if (closedByUser) {
@@ -648,7 +669,7 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
 
           // This message wasn't explicitly requested by a send()
           // action, so there is no Promise pending.
-          _emit("incoming", message)
+          _emit("incoming", {...message, url: socket.url})
 
           // The socket is now ready to send outgoing messages,
           // such as a LOG_IN reminder to the backend of this
@@ -700,6 +721,8 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
         user_name = user_id = ""
       }
 
+      // .then() and .catch() are in external script for
+      // initial LogIn call, or _identifyUser() on reconnection
       envelope.resolve({
         status: message.status,
         message: envelope.message // original outgoing message
@@ -726,12 +749,19 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
      */
     function _identifyUser() {
       if (user_name || user_id) {
-        send({
+        const rsvp = 2000
+        promise = send({
           recipient_id: "SYSTEM",
           subject: "LOG_IN",
           user_id,
           user_name
-        })
+        }, rsvp)
+        .then(response => (
+          _emit("info", response)
+        ))
+        .catch(error => (
+          _emit("info", error)
+        ))
       }
     }
 
@@ -937,7 +967,7 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
           ...payload
         }
 
-        console.log("send() - corr:", corr, payload.subject)
+        // console.log("send() - corr:", corr, payload.subject)
 
         const envelope = {
           corr,
@@ -1107,7 +1137,7 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
       // console.log(`ackTimer ${ackTimer} cleared for ${corr} ${message.subject}`)
 
 
-      _recordLatency(time, corr) // corr is just for debugging
+      _recordLatency(time, corr, envelope.message.subject) // corr is just for debugging
 
       // Update the pending status for all messages except PINGs
       if (envelope.message.subject === "PING") {
@@ -1116,7 +1146,7 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
       } else {
         _emit("pending", {
           corr,
-          message: message,
+          message: envelope.message,
           status: "acknowledged"
         })
       }
@@ -1141,7 +1171,8 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
     }
 
 
-    function _recordLatency (time, corr) { // corr for debugging
+    function _recordLatency (time, corr, subject) {
+      // corr and subject only for debugging
       if (typeof time !== "number") {
         // This should never happen
         return
@@ -1156,7 +1187,8 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
         latencies.shift()
       }
 
-      _emit("info", `ACK ${ms}, corr: ${corr.slice(0, 8)}`)
+      ++pulses
+      _emit("info", `${pulses}: ACK ${ms} ${corr.slice(0, 8)} ${subject}`)
     }
 
 
@@ -1169,16 +1201,12 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
      *        or user-initiated message
      */
     function _treatMissedACK(ws, corr, subject) {
-
-      // console.log(`MISSED ACK ${corr.slice(0, 8)} ${subject}`)
-
-      // console.log("MISSED ACK corr:", corr, subject)
       // Ensure that _settleACK will not run if the actual ACK
       // response arrives after its deadline.
       const envelope = ws._pending.get(corr)
       const { message, time } = envelope
                     // ^^^^ time only for debugging "warn" below
-      _emit("warn", `MISSED ACK: ${corr.slice(0, 8)} after ${Date.now() - time} ms`)
+      _emit("warn", `MISSED ACK for ${subject} ${corr.slice(0, 8)} after ${Date.now() - time} ms`)
 
       const isPING = message.subject === "PING"
       if (isPING) {
@@ -1276,10 +1304,10 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
 
       // Clean up now that rsvp has been received
       clearTimeout(endTimer)
-      ws.queue(corr)
+      queue.delete(corr)
       ws._pending.delete(corr)
 
-      _emit("info", `${message.subject} ("${corr.slice(0,8)}…") in _treatResponse()`)
+      _emit("info", `${message.subject} ${corr.slice(0,8)} in _treatResponse()`)
 
       // It's possible that the ACK message sent immediately by the
       // has not arrived yet. Consider this receipt also as an

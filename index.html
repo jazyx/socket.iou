@@ -3,13 +3,16 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="css/styles.css">
+  <link rel="stylesheet" href="css/recorder.css">
   <script src="https://cdn.socket.io/4.8.3/socket.io.min.js"></script>
 
-  <!-- Create global SocketConsole -->
-  <script defer src="js/socketconsole.js"></script>
+  <!-- Create global Event Recorder -->
+  <script defer src="js/customRecords.js"></script>
+  <script defer src="js/Recorder.js"></script>
+
   <!-- Create global GameSocket -->
-  <script defer src="js/gamesocket.js"></script>
+  <script defer src="js/gameSocket.js"></script>
 
   <script defer src="js/placeholdergame.js"></script>
   <title>Socket MVP</title>
@@ -59,7 +62,6 @@
         type="text"
         value="WebSocket"
       />
-    </form>
     <div id="message-buttons">
       <button
         id="rsvp"
@@ -67,14 +69,8 @@
       >
         RSVP
       </button>
-      <button
-        id="clear"
-        type="button"
-      >
-        Clear
-      </button>
     </div>
-    <ul id="messages"></ul>
+    </form>
   </main>
 </body>
 </html>
