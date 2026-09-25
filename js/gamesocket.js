@@ -174,7 +174,6 @@
       // Listeners
       on,
       off,
-      listeners
     }
     return api
 
@@ -659,45 +658,58 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
         }
 
         case "LOG_IN": {
-          const envelope = queue.get(message.corr)
-
-          // console.log(`LOG_IN ${message.corr} envelope: ${JSON.stringify(envelope)}`)
-          if (!envelope) {
-            // Not one of ours, or already treated
-            break
-          }
-          // Response received; no need to resend
-          clearTimeout(envelope.endTimer)
-          queue.delete(message.corr)
-
-          // console.log(`LOG_IN envelope${envelope}`)
-          
-
-          // Store user_id and user_name locally. These can be
-          // accessed through gameSocket.getUser()
-          if (message.status === "LOGGED_IN") {
-            ({ user_id, user_name } = message)
-
-            // Now that the backend can identify the user to whom
-            // this socket belongs, it's safe to send any
-            // previously unacknowledged messages.
-            _sendMessagesInQueue()
-
-          } else {
-            // LOGIN_FAILED: perhaps the previously connected
-            // user has been expelled.
-            user_name = user_id = ""
-          }
-
-          _emit("pending", {
-            corr: message.corr,
-            message, // contains status, user_name and user_id
-            status: "handled"
-          })
+          _handleLogIn(message)
+          break
         }
       }
 
       return true // tell _onMessage() this was already treated
+    }
+
+
+    function _handleLogIn(message) {
+      const envelope = queue.get(message.corr)
+
+      // console.log(`LOG_IN ${message.corr} envelope: ${JSON.stringify(envelope)}`)
+      if (!envelope) {
+        // Not one of ours, or already treated
+        return
+      }
+
+      // Response received; no need to resend
+      clearTimeout(envelope.ackTimer) // might already be cleared
+      clearTimeout(envelope.endTimer)
+      queue.delete(message.corr)
+
+      // console.log(`LOG_IN envelope${envelope}`)
+
+
+      // Store user_id and user_name locally. These can be
+      // accessed through gameSocket.getUser()
+      if (message.status === "LOGGED_IN") {
+        ({ user_id, user_name } = message)
+
+        // Now that the backend can identify the user to whom
+        // this socket belongs, it's safe to send any
+        // previously unacknowledged messages.
+        _sendMessagesInQueue()
+
+      } else {
+        // LOGIN_FAILED: perhaps the previously connected
+        // user has been expelled.
+        user_name = user_id = ""
+      }
+
+      envelope.resolve({
+        status: message.status,
+        message: envelope.message // original outgoing message
+      })
+
+      _emit("pending", {
+        corr: message.corr,
+        message, // contains status, user_name and user_id
+        status: "handled"
+      })
     }
 
 
@@ -925,7 +937,7 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
           ...payload
         }
 
-        // console.log("corr:", corr, payload.subject)
+        console.log("send() - corr:", corr, payload.subject)
 
         const envelope = {
           corr,
@@ -1093,7 +1105,7 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
       clearTimeout(ackTimer)
       envelope.ackTimer = false
       // console.log(`ackTimer ${ackTimer} cleared for ${corr} ${message.subject}`)
-      
+
 
       _recordLatency(time, corr) // corr is just for debugging
 
@@ -1157,6 +1169,9 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
      *        or user-initiated message
      */
     function _treatMissedACK(ws, corr, subject) {
+
+      // console.log(`MISSED ACK ${corr.slice(0, 8)} ${subject}`)
+
       // console.log("MISSED ACK corr:", corr, subject)
       // Ensure that _settleACK will not run if the actual ACK
       // response arrives after its deadline.
@@ -1165,29 +1180,34 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
                     // ^^^^ time only for debugging "warn" below
       _emit("warn", `MISSED ACK: ${corr.slice(0, 8)} after ${Date.now() - time} ms`)
 
-      if (message.subject === "PING") {
+      const isPING = message.subject === "PING"
+      if (isPING) {
         // Tidy up for garbage collection
-        return _cleanUpPing(ws, envelope)
+        _cleanUpPing(ws, envelope)
+
+      } else {
+        // The immediate ACK message did not arrive in time, but
+        // this could have been a glitch. It might arrive still
+        // arrive before its deadline.
+        // If this happens for a non-rsvp message, the outgoing
+        // eventually message succeeded. A late "acknowledged"
+        // status can be emitted, and the Promise can be
+        // resolved.
+        // If this happens for an rsvp message, there are still
+        // two chances for success during the lifetime of this
+        //  current socket: a late ACK message and a timely rsvp.
+
+        // Action: Leave the envelope on both queue and ws._pending.
+
+        // Provide a progress update
+        _emit("pending", { corr, message, status: "overdue ACK" })
       }
 
-      // The immediate ACK message did not arrive in time, but this
-      // could have been a glitch. It might arrive still arrive
-      // before its deadline.
-      // If this happens for a non-rsvp message, the outgoing
-      // eventually message succeeded. A late "acknowledged" status
-      // can be emitted, and the Promise can be resolved.
-      // If this happens for an rsvp message, there are still two
-      // chances for success during the lifetime of this current
-      // socket: a late ACK message and a timely rsvp.
-      // However, this missed ACK is a sign that the socket may
-      // already have broken. If it continues a sequence of other
+      // This missed ACK is a sign that the socket may already
+      // have broken. If it continues a sequence of other
       // missed ACK messages, this socket will be abandoned, and
       // the whole send + ack (+ rsvp) process will start again
       // with a new socket.
-      // Action: Leave the envelope on both queue and ws._pending.
-
-      // Provide a progress update
-      _emit("pending", { corr, message, status: "overdue ACK" })
 
       if (ws !== socket) {
         // A new socket has already taken control. The envelope is
@@ -1200,14 +1220,16 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
       // initiate reconnection depending on whether this one
       // missed ACK was just a glitch.
 
-      if (++ws._ackMiss >= opts.pulseMaxMisses) {
+      ws._ackMiss++
+      console.log("ws._ackMiss:", ws._ackMiss, socket_id)
+      if (ws._ackMiss >= opts.pulseMaxMisses) {
         _abandonSocket(ws, 1000, "reconnecting")
         // ws._pending will be cleared, and all envelopes in queue
         // will be resent when socket opens. If a delayed ACK
         // message arrives now, _onMessage() will ignore it,
         // because sender ws !== current socket
 
-      } else {
+      } else if (!isPING) {
         // Use the same socket to resend the message with a new
         // ackTimer, to generate a new ACK message. Note that the
         // earlier ACK message may still be on its way, so it's
@@ -1307,7 +1329,7 @@ IS IT GOOD TO _setState("RECONNECTING")?`)
       const status = rsvp ? "unknown" : "no ACK"
 
       _emit("pending", { corr, message, status })
-      resolve("pending", { message, status })
+      resolve({ message, status })
     }
 
 
