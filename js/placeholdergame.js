@@ -7,7 +7,6 @@ const parent     = document.body
 const backend    = document.getElementById("backend")
 const gameSocket = GameSocket.createGameSocket({
   url: backend.value,
-  pulseMaxMisses: 1
 })
 const eventHandler = {}
 Recorder({

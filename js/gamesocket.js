@@ -232,7 +232,7 @@
       // fails to be acknowledged. If there is no active socket,
       // ensures that reconnection will occur.
       if (socket) {
-        _reschedulePulse(socket)
+        _reschedulePulse(socket, 0)
 
       } else {
         _setState("RECONNECTING") // ignored if RECONNECTING now
@@ -325,6 +325,8 @@
         generation: myGen,
         reason
       })
+
+      _scheduleReconnect() // in case this attempt fails
     }
 
 
@@ -399,6 +401,7 @@
     function _onOpen (ws) {
       if (ws !== socket) { return }
 
+      _cancelReconnect()
       socket_id = "" // a new value will be sent on "CONNECTION"
       reconnectMs = opts.reconnectBaseMs // delay until next time
 
@@ -839,13 +842,15 @@
      * Prevents any currently scheduled PING from being sent, and
      * schedules one at the appropriate later time.
      */
-    function _reschedulePulse(ws) {
+    function _reschedulePulse(ws, delay) { // undefined || 0
       if (ws !== socket) { return }
 
       clearTimeout(ws._pulseTimer)
 
       const pulse = () => send({ subject: "PING" })
-      const delay = _pulseInterval()
+      if (isNaN(parseInt(delay)))  {
+        delay = _pulseInterval()
+      }
       ws._pulseTimer = setTimeout(pulse, delay)
     }
 
@@ -1212,6 +1217,8 @@
       if (isPING) {
         // Tidy up for garbage collection
         _cleanUpPing(ws, envelope)
+        // Send a new PING to check if this was just a glitch
+        _reschedulePulse(ws, 0)
 
       } else {
         // The immediate ACK message did not arrive in time, but

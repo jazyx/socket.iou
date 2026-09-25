@@ -17,8 +17,13 @@ function customRecords() {
 
 
     incoming: ({ data, event, details, summary, addEntry }) => {
-      const { subject } = data
-      summary.textContent = `incoming: ${subject}`
+      const { subject, recipient_id } = data
+      const socket_id = recipient_id ? recipient_id.slice(0,8) : ""
+      summary.textContent = `incoming: ${subject} ${socket_id}`
+
+      if (socket_id) {
+        summary.style.backgroundColor = "#906"
+      }
 
       addEntry({ data, event, details, summary })
     },
@@ -86,6 +91,16 @@ function customRecords() {
         }
 
         data = ""
+      } else {
+        const action = data.action
+        if (action) {
+          if (action === "_scheduleReconnect") {
+            summary.textContent = `_scheduleReconnect ${data.reconnectMs}`
+            summary.style.backgroundColor = "#609"
+          } else {
+            summary.textContent = `${action} info`
+          }
+        }
       }
 
       addEntry({ data, event, details, summary })
